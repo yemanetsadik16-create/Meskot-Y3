@@ -62,16 +62,43 @@ jobs:
           GOOGLE_SERVICES_JSON_RAW: ${{ secrets.GOOGLE_SERVICES_JSON }}
           GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
-          if [ -n "$GOOGLE_SERVICES_JSON_RAW" ]; then
-            printf '%s\n' "$GOOGLE_SERVICES_JSON_RAW" > app/google-services.json
-          elif [ -n "$GOOGLE_SERVICES_JSON_B64" ]; then
-            echo "$GOOGLE_SERVICES_JSON_B64" | base64 -d > app/google-services.json
-          fi
+          python3 - <<'PY'
+          import base64, json, os, sys
 
-          if [ ! -f "app/google-services.json" ]; then
-            echo "::error::Missing app/google-services.json! Add a GitHub Actions repository secret named GOOGLE_SERVICES_JSON containing your google-services.json file (Settings -> Secrets and variables -> Actions -> New repository secret), then re-run this workflow."
-            exit 1
-          fi
+          raw = os.environ.get("GOOGLE_SERVICES_JSON_RAW", "")
+          b64 = os.environ.get("GOOGLE_SERVICES_JSON_B64", "")
+
+          if not raw and b64:
+              raw = base64.b64decode(b64.strip()).decode("utf-8-sig")
+
+          if raw:
+              # Strip BOM, whitespace, markdown fences, and any stray trailing text after the JSON object
+              text = raw.lstrip("\ufeff").strip()
+              start = text.find("{")
+              if start == -1:
+                  print("::error::GOOGLE_SERVICES_JSON secret does not contain a JSON object starting with '{'.")
+                  sys.exit(1)
+              try:
+                  obj, _ = json.JSONDecoder().raw_decode(text, start)
+              except json.JSONDecodeError as exc:
+                  print(f"::error::Invalid JSON in GOOGLE_SERVICES_JSON secret: {exc}")
+                  sys.exit(1)
+              with open("app/google-services.json", "w", encoding="utf-8") as f:
+                  json.dump(obj, f, indent=2)
+                  f.write("\n")
+
+          if not os.path.isfile("app/google-services.json"):
+              print("::error::Missing app/google-services.json! Add a GitHub Actions repository secret named GOOGLE_SERVICES_JSON containing your google-services.json file, then re-run this workflow.")
+              sys.exit(1)
+
+          # Final strict validation
+          with open("app/google-services.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+          if "project_info" not in data or "client" not in data:
+              print("::error::app/google-services.json is missing required 'project_info' or 'client' keys.")
+              sys.exit(1)
+          print("Validated app/google-services.json successfully.")
+          PY
 
       - name: Build Release and Debug APKs
         run: gradle :app:assembleRelease :app:assembleDebug --no-daemon
