@@ -4,21 +4,20 @@ Bilingual (English / አማርኛ) Ethiopian & Habesha community social network 
 
 ## GitHub Actions APK Publishing Workflow
 
-This repository includes an automated GitHub Actions workflow at `.github/workflows/android-apk-release.yml` that builds and publishes the Android APK automatically:
+This repository includes an automated GitHub Actions workflow at `.github/workflows/android-apk-release.yml` that builds and publishes the Android APK automatically.
 
+### Required One-Time GitHub Setup
+AI Studio omits `app/google-services.json` when pushing to GitHub for security. Add it once as a GitHub Actions secret:
+
+1. In your GitHub repository, open **Settings → Secrets and variables → Actions**.
+2. Click **New repository secret**.
+3. Set **Name** to `GOOGLE_SERVICES_JSON`.
+4. Paste the full contents of your `google-services.json` file into **Secret** and save.
+5. Re-run the workflow in the **Actions** tab (or push a commit / `v1.0.0` tag).
+
+*(Optionally, you can also set `GOOGLE_SERVICES_JSON_BASE64` or a custom `KEYSTORE_BASE64` secret.)*
+
+### Triggers
 - **Push to `main` / `master`**: Builds `Meskot-release.apk` and `Meskot-debug.apk`, uploads them as workflow artifacts, and updates the rolling `latest` GitHub Release.
 - **Push a version tag (e.g., `v1.0.0`)**: Publishes a full versioned GitHub Release with `Meskot-release.apk` attached.
-- **Manual trigger**: Go to **Actions → Build & Publish Meskot APK → Run workflow** to trigger a build and optionally specify a release tag.
-
-### Optional GitHub Repository Secrets
-The workflow automatically decodes `debug.keystore.base64` and uses `app/google-services.json` out of the box. For custom production signing, you may optionally configure:
-- `KEYSTORE_BASE64`: Base64-encoded Android release keystore.
-- `GOOGLE_SERVICES_JSON_BASE64`: Base64-encoded `google-services.json` override.
-
-## Local Build
-
-```bash
-gradle :app:assembleRelease
-```
-
-The generated APK is written to `app/build/outputs/apk/release/app-release.apk`.
+- **Manual trigger**: Go to **Actions → Build & Publish Meskot APK → Run workflow**.
