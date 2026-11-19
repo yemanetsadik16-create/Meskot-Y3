@@ -1,0 +1,18 @@
+# Gradle & Kotlin build caches
+.gradle/
+.kotlin/
+.build-outputs/
+build/
+app/build/
+release-apks/
+
+# IDE & local environment files
+.idea/
+*.iml
+local.properties
+
+# Decoded keystore (keep debug.keystore.base64 tracked for CI)
+debug.keystore
+
+# Emulator & debug logs
+*-debug.log

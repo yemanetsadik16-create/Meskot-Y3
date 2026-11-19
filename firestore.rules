@@ -1,0 +1,426 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function affectedKeys() {
+      return incoming().diff(existing()).affectedKeys();
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isBoundedString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isValidTimestamp(val) {
+      return val is timestamp && val <= request.time;
+    }
+
+    function isValidPublicProfile(data) {
+      return data.keys().hasOnly([
+          'displayName', 'bio', 'location', 'avatarColorHex',
+          'online', 'verified', 'stars', 'visibility', 'createdAt', 'updatedAt'
+        ])
+        && isNonEmptyString(data.displayName, 100)
+        && isBoundedString(data.bio, 400)
+        && isBoundedString(data.location, 120)
+        && data.avatarColorHex is int
+        && data.online is bool
+        && data.verified is bool
+        && data.stars is int && data.stars >= 0
+        && data.visibility == 'PUBLIC'
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidUserPrivateProfile(data) {
+      return data.keys().hasOnly([
+          'email', 'walletEtb', 'friendIds', 'savedPostIds',
+          'hiddenPostIds', 'savedListingIds', 'createdAt', 'updatedAt'
+        ])
+        && isBoundedString(data.email, 200)
+        && data.walletEtb is number && data.walletEtb >= 0
+        && data.friendIds is list && data.friendIds.size() <= 500
+        && data.savedPostIds is list && data.savedPostIds.size() <= 500
+        && data.hiddenPostIds is list && data.hiddenPostIds.size() <= 500
+        && data.savedListingIds is list && data.savedListingIds.size() <= 500
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPost(data) {
+      return data.keys().hasAll([
+          'authorId', 'authorName', 'text', 'privacy', 'bgColorIndex',
+          'reactions', 'comments', 'shareCount', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'authorId', 'authorName', 'text', 'privacy', 'bgColorIndex',
+          'imageUri', 'groupId', 'reactions', 'comments',
+          'sharedPostOriginalId', 'sharedPostAuthor', 'sharedPostText',
+          'shareCount', 'createdAt', 'updatedAt'
+        ])
+        && isNonEmptyString(data.authorId, 128)
+        && isNonEmptyString(data.authorName, 100)
+        && isBoundedString(data.text, 4000)
+        && data.privacy in ['PUBLIC', 'FRIENDS', 'ONLY_ME']
+        && data.bgColorIndex is int && data.bgColorIndex >= 0 && data.bgColorIndex <= 10
+        && (!('imageUri' in data) || isBoundedString(data.imageUri, 2000))
+        && (!('groupId' in data) || isBoundedString(data.groupId, 128))
+        && (!('sharedPostOriginalId' in data) || isBoundedString(data.sharedPostOriginalId, 128))
+        && (!('sharedPostAuthor' in data) || isBoundedString(data.sharedPostAuthor, 100))
+        && (!('sharedPostText' in data) || isBoundedString(data.sharedPostText, 4000))
+        && data.reactions is map
+        && data.comments is list && data.comments.size() <= 500
+        && data.shareCount is int && data.shareCount >= 0
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidStory(data) {
+      return data.keys().hasOnly([
+          'authorId', 'authorName', 'caption', 'bgColorHex',
+          'live', 'visibility', 'createdAt'
+        ])
+        && isNonEmptyString(data.authorId, 128)
+        && isNonEmptyString(data.authorName, 100)
+        && isNonEmptyString(data.caption, 300)
+        && data.bgColorHex is int
+        && data.live is bool
+        && data.visibility == 'PUBLIC'
+        && isValidTimestamp(data.createdAt);
+    }
+
+    function isValidFriendRequest(data) {
+      return data.keys().hasOnly(['fromUid', 'toUid', 'participantUids', 'createdAt'])
+        && isNonEmptyString(data.fromUid, 128)
+        && isNonEmptyString(data.toUid, 128)
+        && data.fromUid != data.toUid
+        && data.participantUids is list && data.participantUids.size() == 2
+        && data.fromUid in data.participantUids
+        && data.toUid in data.participantUids
+        && isValidTimestamp(data.createdAt);
+    }
+
+    function isValidConversation(data) {
+      return data.keys().hasOnly(['participantIds', 'lastMessage', 'createdAt', 'updatedAt'])
+        && data.participantIds is list && data.participantIds.size() == 2
+        && isBoundedString(data.lastMessage, 2000)
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidChatMessage(data) {
+      return data.keys().hasOnly(['senderId', 'participantIds', 'text', 'edited', 'createdAt', 'updatedAt'])
+        && isNonEmptyString(data.senderId, 128)
+        && data.participantIds is list && data.participantIds.size() == 2
+        && data.senderId in data.participantIds
+        && isNonEmptyString(data.text, 2000)
+        && data.edited is bool
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidGroup(data) {
+      return data.keys().hasOnly([
+          'name', 'description', 'coverColorHex', 'creatorId',
+          'memberIds', 'visibility', 'createdAt', 'updatedAt'
+        ])
+        && isNonEmptyString(data.name, 120)
+        && isBoundedString(data.description, 600)
+        && data.coverColorHex is int
+        && isNonEmptyString(data.creatorId, 128)
+        && data.memberIds is list && data.memberIds.size() <= 1000
+        && data.visibility == 'PUBLIC'
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidListing(data) {
+      return data.keys().hasOnly([
+          'sellerId', 'sellerName', 'title', 'priceEtb', 'category',
+          'city', 'description', 'visibility', 'createdAt'
+        ])
+        && isNonEmptyString(data.sellerId, 128)
+        && isNonEmptyString(data.sellerName, 100)
+        && isNonEmptyString(data.title, 160)
+        && data.priceEtb is number && data.priceEtb >= 0
+        && isNonEmptyString(data.category, 60)
+        && isNonEmptyString(data.city, 80)
+        && isBoundedString(data.description, 2000)
+        && data.visibility == 'PUBLIC'
+        && isValidTimestamp(data.createdAt);
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['actorId', 'actorName', 'type', 'messageEn', 'messageAm', 'read', 'createdAt'])
+        && data.keys().hasOnly(['actorId', 'actorName', 'type', 'targetId', 'messageEn', 'messageAm', 'read', 'createdAt'])
+        && isNonEmptyString(data.actorId, 128)
+        && isNonEmptyString(data.actorName, 100)
+        && isNonEmptyString(data.type, 40)
+        && (!('targetId' in data) || isBoundedString(data.targetId, 128))
+        && isNonEmptyString(data.messageEn, 300)
+        && isNonEmptyString(data.messageAm, 300)
+        && data.read is bool
+        && isValidTimestamp(data.createdAt);
+    }
+
+    function isValidAlbum(data) {
+      return data.keys().hasOnly(['ownerId', 'title', 'photoUris', 'createdAt'])
+        && isNonEmptyString(data.ownerId, 128)
+        && isNonEmptyString(data.title, 120)
+        && data.photoUris is list && data.photoUris.size() <= 200
+        && isValidTimestamp(data.createdAt);
+    }
+
+    function isValidReel(data) {
+      return data.keys().hasOnly([
+          'authorId', 'authorName', 'caption', 'likedBy', 'comments',
+          'visibility', 'createdAt', 'updatedAt'
+        ])
+        && isNonEmptyString(data.authorId, 128)
+        && isNonEmptyString(data.authorName, 100)
+        && isNonEmptyString(data.caption, 400)
+        && data.likedBy is list && data.likedBy.size() <= 2000
+        && data.comments is list && data.comments.size() <= 500
+        && data.visibility == 'PUBLIC'
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidAdCampaign(data) {
+      return data.keys().hasOnly([
+          'ownerId', 'title', 'objective', 'budgetEtb', 'days',
+          'impressions', 'clicks', 'active', 'createdAt'
+        ])
+        && isNonEmptyString(data.ownerId, 128)
+        && isNonEmptyString(data.title, 140)
+        && isNonEmptyString(data.objective, 80)
+        && data.budgetEtb is number && data.budgetEtb >= 0
+        && data.days is int && data.days >= 1 && data.days <= 365
+        && data.impressions is int && data.impressions >= 0
+        && data.clicks is int && data.clicks >= 0
+        && data.active is bool
+        && isValidTimestamp(data.createdAt);
+    }
+
+    // Public profiles (no PII)
+    match /public_profiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || existing().visibility == 'PUBLIC');
+      allow list: if isSignedIn() && resource.data.visibility == 'PUBLIC';
+      allow create: if isOwner(userId) && isValidId(userId) && isValidPublicProfile(incoming());
+      allow update: if isOwner(userId) && isValidId(userId)
+        && isValidPublicProfile(incoming())
+        && incoming().createdAt == existing().createdAt
+        && affectedKeys().hasOnly(['displayName', 'bio', 'location', 'avatarColorHex', 'online', 'updatedAt']);
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    // Owner-only private user document + subcollections
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUserPrivateProfile(incoming());
+      allow update: if isOwner(userId) && isValidId(userId)
+        && isValidUserPrivateProfile(incoming())
+        && incoming().createdAt == existing().createdAt
+        && affectedKeys().hasOnly(['email', 'walletEtb', 'friendIds', 'savedPostIds', 'hiddenPostIds', 'savedListingIds', 'updatedAt']);
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /notifications/{notifId} {
+        allow get: if isOwner(userId) && isValidId(notifId);
+        allow list: if isOwner(userId);
+        allow create: if isSignedIn() && isValidId(notifId)
+          && incoming().actorId == request.auth.uid
+          && isValidNotification(incoming());
+        allow update: if isOwner(userId) && isValidId(notifId)
+          && isValidNotification(incoming())
+          && incoming().createdAt == existing().createdAt
+          && incoming().actorId == existing().actorId
+          && affectedKeys().hasOnly(['read']);
+        allow delete: if isOwner(userId) && isValidId(notifId);
+      }
+
+      match /albums/{albumId} {
+        allow get: if isOwner(userId) && isValidId(albumId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(albumId)
+          && incoming().ownerId == request.auth.uid
+          && isValidAlbum(incoming());
+        allow update: if isOwner(userId) && isValidId(albumId)
+          && isValidAlbum(incoming())
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && affectedKeys().hasOnly(['title', 'photoUris']);
+        allow delete: if isOwner(userId) && isValidId(albumId);
+      }
+
+      match /ad_campaigns/{adId} {
+        allow get: if isOwner(userId) && isValidId(adId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(adId)
+          && incoming().ownerId == request.auth.uid
+          && isValidAdCampaign(incoming());
+        allow update: if isOwner(userId) && isValidId(adId)
+          && isValidAdCampaign(incoming())
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && affectedKeys().hasOnly(['title', 'active']);
+        allow delete: if isOwner(userId) && isValidId(adId);
+      }
+    }
+
+    // Community posts
+    match /posts/{postId} {
+      allow get: if isSignedIn() && isValidId(postId)
+        && (existing().privacy == 'PUBLIC' || existing().privacy == 'FRIENDS' || existing().authorId == request.auth.uid);
+      allow list: if isSignedIn()
+        && (resource.data.privacy == 'PUBLIC' || resource.data.authorId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(postId)
+        && incoming().authorId == request.auth.uid
+        && isValidPost(incoming());
+      allow update: if isSignedIn() && isValidId(postId)
+        && isValidPost(incoming())
+        && incoming().authorId == existing().authorId
+        && incoming().authorName == existing().authorName
+        && incoming().createdAt == existing().createdAt
+        && (
+          (isOwner(existing().authorId) && affectedKeys().hasOnly(['text', 'privacy', 'updatedAt']))
+          || (existing().privacy != 'ONLY_ME' && affectedKeys().hasOnly(['reactions', 'comments', 'shareCount', 'updatedAt']))
+        );
+      allow delete: if isSignedIn() && isValidId(postId) && isOwner(existing().authorId);
+    }
+
+    // Stories
+    match /stories/{storyId} {
+      allow get: if isSignedIn() && isValidId(storyId) && existing().visibility == 'PUBLIC';
+      allow list: if isSignedIn() && resource.data.visibility == 'PUBLIC';
+      allow create: if isSignedIn() && isValidId(storyId)
+        && incoming().authorId == request.auth.uid
+        && isValidStory(incoming());
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(storyId) && isOwner(existing().authorId);
+    }
+
+    // Friend requests
+    match /friend_requests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && request.auth.uid in existing().participantUids;
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+      allow create: if isSignedIn() && isValidId(requestId)
+        && incoming().fromUid == request.auth.uid
+        && isValidFriendRequest(incoming());
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(requestId) && request.auth.uid in existing().participantUids;
+    }
+
+    // Direct conversations & messages
+    match /conversations/{convoId} {
+      allow get: if isSignedIn() && isValidId(convoId) && request.auth.uid in existing().participantIds;
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantIds;
+      allow create: if isSignedIn() && isValidId(convoId)
+        && request.auth.uid in incoming().participantIds
+        && isValidConversation(incoming());
+      allow update: if isSignedIn() && isValidId(convoId)
+        && request.auth.uid in existing().participantIds
+        && incoming().participantIds == existing().participantIds
+        && incoming().createdAt == existing().createdAt
+        && isValidConversation(incoming())
+        && affectedKeys().hasOnly(['lastMessage', 'updatedAt']);
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow get: if isSignedIn() && isValidId(messageId) && request.auth.uid in existing().participantIds;
+        allow list: if isSignedIn() && request.auth.uid in resource.data.participantIds;
+        allow create: if isSignedIn() && isValidId(messageId)
+          && incoming().senderId == request.auth.uid
+          && request.auth.uid in incoming().participantIds
+          && isValidChatMessage(incoming());
+        allow update: if isSignedIn() && isValidId(messageId)
+          && existing().senderId == request.auth.uid
+          && incoming().senderId == existing().senderId
+          && incoming().participantIds == existing().participantIds
+          && incoming().createdAt == existing().createdAt
+          && isValidChatMessage(incoming())
+          && affectedKeys().hasOnly(['text', 'edited', 'updatedAt']);
+        allow delete: if isSignedIn() && isValidId(messageId) && existing().senderId == request.auth.uid;
+      }
+    }
+
+    // Community groups
+    match /groups/{groupId} {
+      allow get: if isSignedIn() && isValidId(groupId) && existing().visibility == 'PUBLIC';
+      allow list: if isSignedIn() && resource.data.visibility == 'PUBLIC';
+      allow create: if isSignedIn() && isValidId(groupId)
+        && incoming().creatorId == request.auth.uid
+        && request.auth.uid in incoming().memberIds
+        && isValidGroup(incoming());
+      allow update: if isSignedIn() && isValidId(groupId)
+        && isValidGroup(incoming())
+        && incoming().creatorId == existing().creatorId
+        && incoming().createdAt == existing().createdAt
+        && (
+          (isOwner(existing().creatorId) && affectedKeys().hasOnly(['name', 'description', 'memberIds', 'updatedAt']))
+          || affectedKeys().hasOnly(['memberIds', 'updatedAt'])
+        );
+      allow delete: if isSignedIn() && isValidId(groupId) && isOwner(existing().creatorId);
+    }
+
+    // Marketplace listings
+    match /listings/{listingId} {
+      allow get: if isSignedIn() && isValidId(listingId) && existing().visibility == 'PUBLIC';
+      allow list: if isSignedIn() && resource.data.visibility == 'PUBLIC';
+      allow create: if isSignedIn() && isValidId(listingId)
+        && incoming().sellerId == request.auth.uid
+        && isValidListing(incoming());
+      allow update: if isSignedIn() && isValidId(listingId)
+        && isOwner(existing().sellerId)
+        && isValidListing(incoming())
+        && incoming().sellerId == existing().sellerId
+        && incoming().createdAt == existing().createdAt
+        && affectedKeys().hasOnly(['title', 'priceEtb', 'category', 'city', 'description']);
+      allow delete: if isSignedIn() && isValidId(listingId) && isOwner(existing().sellerId);
+    }
+
+    // Community reels
+    match /reels/{reelId} {
+      allow get: if isSignedIn() && isValidId(reelId) && existing().visibility == 'PUBLIC';
+      allow list: if isSignedIn() && resource.data.visibility == 'PUBLIC';
+      allow create: if isSignedIn() && isValidId(reelId)
+        && incoming().authorId == request.auth.uid
+        && isValidReel(incoming());
+      allow update: if isSignedIn() && isValidId(reelId)
+        && isValidReel(incoming())
+        && incoming().authorId == existing().authorId
+        && incoming().authorName == existing().authorName
+        && incoming().createdAt == existing().createdAt
+        && affectedKeys().hasOnly(['likedBy', 'comments', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(reelId) && isOwner(existing().authorId);
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Meskot",
+  "description": "Meskot (መስኮት) — Bilingual English and Amharic Ethiopian community social network with News Feed, Stories, Circle, Direct Messaging, Groups, Marketplace, Photos, and Creator Hub.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

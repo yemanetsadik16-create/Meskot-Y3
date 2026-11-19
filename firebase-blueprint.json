@@ -1,0 +1,263 @@
+{
+  "databaseId": "ai-studio-android-meskotro-aa905bbb-3d87-4d82-bd16-4cc70947b90f",
+  "entities": {
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Publicly visible Meskot community member profile without PII.",
+      "type": "object",
+      "properties": {
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "bio": { "type": "string", "maxLength": 400 },
+        "location": { "type": "string", "maxLength": 120 },
+        "avatarColorHex": { "type": "number" },
+        "online": { "type": "boolean" },
+        "verified": { "type": "boolean" },
+        "stars": { "type": "number", "minimum": 0 },
+        "visibility": { "type": "string", "enum": ["PUBLIC"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["displayName", "bio", "location", "avatarColorHex", "online", "verified", "stars", "visibility", "createdAt", "updatedAt"]
+    },
+    "UserPrivateProfile": {
+      "title": "UserPrivateProfile",
+      "description": "Owner-only private user account data including email, wallet, friends, and saved IDs.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 200 },
+        "walletEtb": { "type": "number", "minimum": 0 },
+        "friendIds": { "type": "array", "items": { "type": "string" } },
+        "savedPostIds": { "type": "array", "items": { "type": "string" } },
+        "hiddenPostIds": { "type": "array", "items": { "type": "string" } },
+        "savedListingIds": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "walletEtb", "friendIds", "savedPostIds", "hiddenPostIds", "savedListingIds", "createdAt", "updatedAt"]
+    },
+    "Post": {
+      "title": "Post",
+      "description": "Community feed or group post.",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "text": { "type": "string", "maxLength": 4000 },
+        "privacy": { "type": "string", "enum": ["PUBLIC", "FRIENDS", "ONLY_ME"] },
+        "bgColorIndex": { "type": "number", "minimum": 0, "maximum": 10 },
+        "imageUri": { "type": "string", "maxLength": 2000 },
+        "groupId": { "type": "string", "maxLength": 128 },
+        "reactions": { "type": "object" },
+        "comments": { "type": "array" },
+        "sharedPostOriginalId": { "type": "string", "maxLength": 128 },
+        "sharedPostAuthor": { "type": "string", "maxLength": 100 },
+        "sharedPostText": { "type": "string", "maxLength": 4000 },
+        "shareCount": { "type": "number", "minimum": 0 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["authorId", "authorName", "text", "privacy", "bgColorIndex", "reactions", "comments", "shareCount", "createdAt", "updatedAt"]
+    },
+    "Story": {
+      "title": "Story",
+      "description": "Meskot community moment/story.",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "caption": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "bgColorHex": { "type": "number" },
+        "live": { "type": "boolean" },
+        "visibility": { "type": "string", "enum": ["PUBLIC"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["authorId", "authorName", "caption", "bgColorHex", "live", "visibility", "createdAt"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "Pending friend connection request between two users.",
+      "type": "object",
+      "properties": {
+        "fromUid": { "type": "string" },
+        "toUid": { "type": "string" },
+        "participantUids": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["fromUid", "toUid", "participantUids", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Direct messaging thread between two users.",
+      "type": "object",
+      "properties": {
+        "participantIds": { "type": "array", "items": { "type": "string" } },
+        "lastMessage": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["participantIds", "lastMessage", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Message inside a conversation.",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "participantIds": { "type": "array", "items": { "type": "string" } },
+        "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "edited": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderId", "participantIds", "text", "edited", "createdAt", "updatedAt"]
+    },
+    "Group": {
+      "title": "Group",
+      "description": "Community group.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 600 },
+        "coverColorHex": { "type": "number" },
+        "creatorId": { "type": "string" },
+        "memberIds": { "type": "array", "items": { "type": "string" } },
+        "visibility": { "type": "string", "enum": ["PUBLIC"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "description", "coverColorHex", "creatorId", "memberIds", "visibility", "createdAt", "updatedAt"]
+    },
+    "MarketListing": {
+      "title": "MarketListing",
+      "description": "Bazaar marketplace listing.",
+      "type": "object",
+      "properties": {
+        "sellerId": { "type": "string" },
+        "sellerName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "priceEtb": { "type": "number", "minimum": 0 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "city": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "visibility": { "type": "string", "enum": ["PUBLIC"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sellerId", "sellerName", "title", "priceEtb", "category", "city", "description", "visibility", "createdAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User notification item.",
+      "type": "object",
+      "properties": {
+        "actorId": { "type": "string" },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "messageEn": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "messageAm": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorId", "actorName", "type", "messageEn", "messageAm", "read", "createdAt"]
+    },
+    "PhotoAlbum": {
+      "title": "PhotoAlbum",
+      "description": "User-created photo album.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "photoUris": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "title", "photoUris", "createdAt"]
+    },
+    "Reel": {
+      "title": "Reel",
+      "description": "Community short video/story reel.",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "caption": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "likedBy": { "type": "array", "items": { "type": "string" } },
+        "comments": { "type": "array", "items": { "type": "string" } },
+        "visibility": { "type": "string", "enum": ["PUBLIC"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["authorId", "authorName", "caption", "likedBy", "comments", "visibility", "createdAt", "updatedAt"]
+    },
+    "AdCampaign": {
+      "title": "AdCampaign",
+      "description": "Owner-scoped ad campaign.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "objective": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "budgetEtb": { "type": "number", "minimum": 0 },
+        "days": { "type": "number", "minimum": 1, "maximum": 365 },
+        "impressions": { "type": "number", "minimum": 0 },
+        "clicks": { "type": "number", "minimum": 0 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "title", "objective", "budgetEtb", "days", "impressions", "clicks", "active", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/public_profiles/{userId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "Public directory of Meskot members without PII."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPrivateProfile" },
+      "description": "Private owner-only user document."
+    },
+    "/users/{userId}/notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "Owner-scoped notifications."
+    },
+    "/users/{userId}/albums/{albumId}": {
+      "schema": { "$ref": "#/entities/PhotoAlbum" },
+      "description": "Owner-scoped photo albums."
+    },
+    "/users/{userId}/ad_campaigns/{adId}": {
+      "schema": { "$ref": "#/entities/AdCampaign" },
+      "description": "Owner-scoped ad campaigns."
+    },
+    "/posts/{postId}": {
+      "schema": { "$ref": "#/entities/Post" },
+      "description": "Community posts."
+    },
+    "/stories/{storyId}": {
+      "schema": { "$ref": "#/entities/Story" },
+      "description": "Community stories/moments."
+    },
+    "/friend_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/FriendRequest" },
+      "description": "Friend requests scoped to sender and recipient."
+    },
+    "/conversations/{convoId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Direct conversations scoped to participants."
+    },
+    "/conversations/{convoId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages within a direct conversation."
+    },
+    "/groups/{groupId}": {
+      "schema": { "$ref": "#/entities/Group" },
+      "description": "Public community groups."
+    },
+    "/listings/{listingId}": {
+      "schema": { "$ref": "#/entities/MarketListing" },
+      "description": "Bazaar marketplace listings."
+    },
+    "/reels/{reelId}": {
+      "schema": { "$ref": "#/entities/Reel" },
+      "description": "Community reels."
+    }
+  }
+}
