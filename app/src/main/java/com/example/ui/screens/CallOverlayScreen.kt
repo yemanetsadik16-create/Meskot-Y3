@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -448,7 +449,7 @@ fun CallOverlayScreen(
                                 onClick = { rtcManager.toggleMute() }
                             )
                             CallControlButton(
-                                icon = if (isSpeakerOn) Icons.Filled.VolumeUp else Icons.Filled.Hearing,
+                                icon = if (isSpeakerOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.Filled.Hearing,
                                 label = if (isSpeakerOn) "Speaker" else "Earpiece",
                                 active = isSpeakerOn,
                                 tag = "call_speaker_button",

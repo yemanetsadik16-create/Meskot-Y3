@@ -101,7 +101,11 @@ jobs:
           PY
 
       - name: Build Release and Debug APKs
-        run: gradle :app:assembleRelease :app:assembleDebug --no-daemon
+        env:
+          GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g"
+        run: |
+          gradle :app:assembleRelease --no-daemon --stacktrace
+          gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: Stage APKs for upload
         shell: bash

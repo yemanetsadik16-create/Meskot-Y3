@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -184,7 +185,7 @@ fun HubScreen(
                         border = BorderStroke(1.dp, MeskotCross.copy(alpha = 0.4f)),
                         modifier = Modifier.fillMaxWidth().height(48.dp).testTag("hub_logout_button")
                     ) {
-                        Icon(Icons.Outlined.Logout, null, tint = MeskotCross, modifier = Modifier.size(18.dp))
+                        Icon(Icons.AutoMirrored.Outlined.Logout, null, tint = MeskotCross, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(MeskotStrings.t(lang, "logout"), color = MeskotCross, fontWeight = FontWeight.SemiBold)
                     }
