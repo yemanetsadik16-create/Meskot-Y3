@@ -190,6 +190,53 @@ data class AdCampaign(
     val active: Boolean = true
 )
 
+data class LiveStreamItem(
+    val id: String = "",
+    val hostId: String = "",
+    val hostName: String = "",
+    val title: String = "",
+    val category: String = "General",
+    val privacy: PostPrivacy = PostPrivacy.PUBLIC,
+    val isLive: Boolean = true,
+    val viewerCount: Int = 1,
+    val reactionsCount: Int = 0,
+    val starsEarned: Int = 0,
+    val startedAtMs: Long = 0L,
+    val endedAtMs: Long? = null,
+    val coverColorHex: Long = 0xFFC93E03
+)
+
+data class LiveComment(
+    val id: String = "",
+    val authorId: String = "",
+    val authorName: String = "",
+    val text: String = "",
+    val isGift: Boolean = false,
+    val giftEmoji: String? = null,
+    val timestampMs: Long = 0L
+)
+
+data class CallSession(
+    val id: String = "",
+    val convoId: String = "",
+    val callerId: String = "",
+    val callerName: String = "",
+    val calleeId: String = "",
+    val calleeName: String = "",
+    val callType: String = "audio", // "audio" or "video"
+    val status: String = "ringing", // "ringing", "accepted", "connected", "ended", "declined", "missed"
+    val offerSdp: String? = null,
+    val answerSdp: String? = null,
+    val createdAtMs: Long = 0L
+)
+
+data class IceCandidateItem(
+    val id: String = "",
+    val sdpMid: String = "",
+    val sdpMLineIndex: Int = 0,
+    val candidate: String = ""
+)
+
 // ==================== Firestore Document DTOs ====================
 
 @Keep

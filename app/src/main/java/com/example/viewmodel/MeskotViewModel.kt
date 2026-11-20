@@ -3,6 +3,7 @@ package com.example.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.call.CallSignalingRepository
 import com.example.data.MeskotDataState
 import com.example.data.MeskotRepository
 import com.example.i18n.AppLang
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalCoroutinesApi::class)
 class MeskotViewModel(
     private val repository: MeskotRepository,
+    val callSignaling: CallSignalingRepository,
     private val currentUserId: String,
     private val initialDisplayName: String,
     private val initialEmail: String,
@@ -29,6 +31,17 @@ class MeskotViewModel(
     private val _activeConvoId = MutableStateFlow<String?>(null)
     val activeConvoId: StateFlow<String?> = _activeConvoId.asStateFlow()
 
+    private val _activeLiveStreamId = MutableStateFlow<String?>(null)
+    val activeLiveStreamId: StateFlow<String?> = _activeLiveStreamId.asStateFlow()
+
+    private val _activeLiveComments = MutableStateFlow<List<LiveComment>>(emptyList())
+    val activeLiveComments: StateFlow<List<LiveComment>> = _activeLiveComments.asStateFlow()
+
+    private val _activeCall = MutableStateFlow<CallSession?>(null)
+    val activeCall: StateFlow<CallSession?> = _activeCall.asStateFlow()
+
+    private val handledCallIds = mutableSetOf<String>()
+
     private val _toastMessage = MutableStateFlow<String?>(null)
     val toastMessage: StateFlow<String?> = _toastMessage.asStateFlow()
 
@@ -36,6 +49,7 @@ class MeskotViewModel(
 
     private var publicProfilesCache: Map<String, UserProfile> = emptyMap()
     private var privateProfileCache: UserPrivateProfileDoc? = null
+    private var extraFriendIdsCache: Set<String> = emptySet()
     private var publicPostsCache: List<PostItem> = emptyList()
     private var myPostsCache: List<PostItem> = emptyList()
     private var conversationsCache: List<Conversation> = emptyList()
@@ -91,7 +105,7 @@ class MeskotViewModel(
             it.copy(
                 currentUser = me,
                 users = mergedUsers,
-                friendIds = priv?.friendIds?.toSet() ?: emptySet(),
+                friendIds = (priv?.friendIds?.toSet() ?: emptySet()) + extraFriendIdsCache,
                 savedPostIds = priv?.savedPostIds?.toSet() ?: emptySet(),
                 hiddenPostIds = priv?.hiddenPostIds?.toSet() ?: emptySet(),
                 savedListingIds = priv?.savedListingIds?.toSet() ?: emptySet(),
@@ -112,14 +126,20 @@ class MeskotViewModel(
     private fun rebuildConversations() {
         val activeId = _activeConvoId.value
         val merged = conversationsCache.map { convo ->
-            if (convo.id == activeId) convo.copy(messages = activeMessagesCache) else convo
+            if (convo.id == activeId) {
+                val combinedMsgs = (convo.messages + activeMessagesCache)
+                    .associateBy { it.id }
+                    .values
+                    .sortedBy { it.timestampMs }
+                convo.copy(messages = combinedMsgs)
+            } else convo
         }
         _dataState.update { it.copy(conversations = merged) }
     }
 
     private fun observeStreams() {
         viewModelScope.launch {
-            repository.observePublicProfiles()
+            repository.observeAllUsers()
                 .catch { handleStreamError(it) }
                 .collect { profiles ->
                     publicProfilesCache = profiles
@@ -135,18 +155,19 @@ class MeskotViewModel(
                 }
         }
         viewModelScope.launch {
-            repository.observePublicPosts()
+            repository.observeFriendsAndFollowers(currentUserId)
                 .catch { handleStreamError(it) }
-                .collect { posts ->
-                    publicPostsCache = posts
-                    rebuildPosts()
+                .collect { extraIds ->
+                    extraFriendIdsCache = extraIds
+                    rebuildUserState()
                 }
         }
         viewModelScope.launch {
-            repository.observeMyPosts(currentUserId)
+            repository.observePosts()
                 .catch { handleStreamError(it) }
                 .collect { posts ->
-                    myPostsCache = posts
+                    publicPostsCache = posts
+                    myPostsCache = emptyList()
                     rebuildPosts()
                 }
         }
@@ -172,7 +193,7 @@ class MeskotViewModel(
             _activeConvoId
                 .flatMapLatest { cid ->
                     if (cid == null) flowOf(emptyList())
-                    else repository.observeMessages(cid, currentUserId)
+                    else repository.observeMessages(cid)
                 }
                 .catch { handleStreamError(it) }
                 .collect { msgs ->
@@ -209,6 +230,32 @@ class MeskotViewModel(
             repository.observeAdCampaigns(currentUserId)
                 .catch { handleStreamError(it) }
                 .collect { ads -> _dataState.update { it.copy(adCampaigns = ads) } }
+        }
+        viewModelScope.launch {
+            repository.observeLiveStreams()
+                .catch { handleStreamError(it) }
+                .collect { streams -> _dataState.update { it.copy(liveStreams = streams) } }
+        }
+        viewModelScope.launch {
+            _activeLiveStreamId
+                .flatMapLatest { sid ->
+                    if (sid == null) flowOf(emptyList())
+                    else repository.observeLiveComments(sid)
+                }
+                .catch { handleStreamError(it) }
+                .collect { comments -> _activeLiveComments.value = comments }
+        }
+        viewModelScope.launch {
+            callSignaling.observeIncomingCalls(currentUserId)
+                .catch { /* ignore transient signaling errors */ }
+                .collect { incoming ->
+                    if (incoming != null &&
+                        _activeCall.value == null &&
+                        incoming.id !in handledCallIds
+                    ) {
+                        _activeCall.value = incoming
+                    }
+                }
         }
     }
 
@@ -475,8 +522,121 @@ class MeskotViewModel(
         }
     }
 
+    fun selectLiveStream(streamId: String?) {
+        val prev = _activeLiveStreamId.value
+        if (prev == streamId) return
+        _activeLiveStreamId.value = streamId
+        if (prev != null) {
+            val prevStream = _dataState.value.liveStreams.find { it.id == prev }
+            if (prevStream != null && prevStream.hostId != currentUserId) {
+                viewModelScope.launch { repository.adjustLiveViewerCount(prev, -1L) }
+            }
+        }
+        if (streamId != null) {
+            val nextStream = _dataState.value.liveStreams.find { it.id == streamId }
+            if (nextStream != null && nextStream.hostId != currentUserId) {
+                viewModelScope.launch { repository.adjustLiveViewerCount(streamId, 1L) }
+            }
+        }
+    }
+
+    fun startLiveStream(
+        title: String,
+        category: String,
+        privacy: PostPrivacy,
+        onStarted: (LiveStreamItem) -> Unit
+    ) {
+        val myName = _dataState.value.currentUser?.name ?: initialDisplayName
+        viewModelScope.launch {
+            repository.startLiveStream(currentUserId, myName, title, category, privacy)
+                .onSuccess { stream ->
+                    _activeLiveStreamId.value = stream.id
+                    onStarted(stream)
+                }
+                .onFailure { showToast(it.message ?: "Could not start live broadcast") }
+        }
+    }
+
+    fun endLiveStream(streamId: String) {
+        viewModelScope.launch {
+            repository.endLiveStream(streamId)
+            if (_activeLiveStreamId.value == streamId) {
+                _activeLiveStreamId.value = null
+            }
+        }
+    }
+
+    fun sendLiveComment(streamId: String, text: String, isGift: Boolean = false, giftEmoji: String? = null) {
+        val myName = _dataState.value.currentUser?.name ?: initialDisplayName
+        viewModelScope.launch {
+            repository.sendLiveComment(streamId, currentUserId, myName, text, isGift, giftEmoji)
+        }
+    }
+
+    fun sendLiveReaction(streamId: String, hostId: String, starsAmount: Int = 0) {
+        val myName = _dataState.value.currentUser?.name ?: initialDisplayName
+        viewModelScope.launch {
+            repository.sendLiveReaction(streamId, hostId, starsAmount)
+            if (starsAmount > 0) {
+                repository.sendLiveComment(
+                    streamId = streamId,
+                    authorId = currentUserId,
+                    authorName = myName,
+                    text = "sent $starsAmount ★ Stars!",
+                    isGift = true,
+                    giftEmoji = "⭐"
+                )
+            }
+        }
+    }
+
+    fun startCall(convoId: String, peerUid: String, peerName: String, callType: String) {
+        if (_activeCall.value != null) return
+        val myName = _dataState.value.currentUser?.name ?: initialDisplayName
+        viewModelScope.launch {
+            runCatching {
+                callSignaling.createOutgoingCall(
+                    convoId = convoId,
+                    callerId = currentUserId,
+                    callerName = myName,
+                    calleeId = peerUid,
+                    calleeName = peerName,
+                    callType = callType
+                )
+            }.onSuccess { session ->
+                handledCallIds.add(session.id)
+                _activeCall.value = session
+            }.onFailure {
+                showToast("Unable to start call: ${it.message}")
+            }
+        }
+    }
+
+    fun onCallClosed(durationSeconds: Int, wasConnected: Boolean, finalStatus: String) {
+        val endedCall = _activeCall.value ?: return
+        handledCallIds.add(endedCall.id)
+        _activeCall.value = null
+
+        // Post a call log into the conversation (caller posts it once so it isn't duplicated)
+        if (endedCall.callerId == currentUserId && endedCall.convoId.isNotBlank()) {
+            val icon = if (endedCall.callType == "video") "📹" else "📞"
+            val label = if (endedCall.callType == "video") "Video call" else "Audio call"
+            val summary = when {
+                wasConnected && durationSeconds > 0 -> {
+                    val m = durationSeconds / 60
+                    val s = durationSeconds % 60
+                    "$icon $label · %02d:%02d".format(m, s)
+                }
+                finalStatus == "declined" -> "$icon $label · Declined"
+                else -> "$icon $label · Missed"
+            }
+            sendMessage(endedCall.convoId, summary)
+        }
+    }
+
     class Factory(
         private val repository: MeskotRepository,
+        private val callSignaling: CallSignalingRepository,
         private val currentUserId: String,
         private val initialDisplayName: String,
         private val initialEmail: String,
@@ -484,7 +644,7 @@ class MeskotViewModel(
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return MeskotViewModel(repository, currentUserId, initialDisplayName, initialEmail, initialLocation) as T
+            return MeskotViewModel(repository, callSignaling, currentUserId, initialDisplayName, initialEmail, initialLocation) as T
         }
     }
 }

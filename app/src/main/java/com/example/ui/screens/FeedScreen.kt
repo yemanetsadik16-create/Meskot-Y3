@@ -48,6 +48,7 @@ fun FeedScreen(
     lang: AppLang,
     onOpenProfile: (String) -> Unit,
     onOpenReels: () -> Unit,
+    onOpenLive: (String?) -> Unit,
     onCreatePost: (String, PostPrivacy, Int, String?) -> Unit,
     onReaction: (String, ReactionType) -> Unit,
     onAddComment: (String, String) -> Unit,
@@ -102,10 +103,15 @@ fun FeedScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(Modifier.width(8.dp))
-                        val liveCount = state.stories.count { it.isLive }
+                        val liveCount = remember(state.stories, state.liveStreams) {
+                            (state.stories.filter { it.isLive }.map { it.id } + state.liveStreams.map { it.id }).toSet().size
+                        }
                         Surface(
                             color = MeskotCross.copy(alpha = 0.12f),
-                            shape = RoundedCornerShape(10.dp)
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .clickable { onOpenLive(null) }
+                                .testTag("stories_live_pill")
                         ) {
                             Text(
                                 "$liveCount LIVE",
@@ -129,7 +135,13 @@ fun FeedScreen(
 
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(state.stories, key = { it.id }) { story ->
-                            StoryCardTile(story = story, onClick = { viewingStory = story })
+                            StoryCardTile(
+                                story = story,
+                                onClick = {
+                                    if (story.isLive) onOpenLive(story.id)
+                                    else viewingStory = story
+                                }
+                            )
                         }
                     }
                 }
@@ -166,7 +178,7 @@ fun FeedScreen(
                     Spacer(Modifier.height(6.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                         ComposerShortcut(Icons.Outlined.RadioButtonChecked, MeskotStrings.t(lang, "btnLive"), MeskotCross) {
-                            showStoryCreator = true
+                            onOpenLive(null)
                         }
                         ComposerShortcut(Icons.Outlined.CameraAlt, MeskotStrings.t(lang, "btnStory"), MeskotGold) {
                             showStoryCreator = true

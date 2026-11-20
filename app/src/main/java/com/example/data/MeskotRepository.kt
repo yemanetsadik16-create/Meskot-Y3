@@ -1,16 +1,19 @@
 package com.example.data
 
 import android.content.Context
+import android.util.Log
 import com.example.R
 import com.example.model.*
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import java.util.UUID
@@ -32,12 +35,14 @@ data class MeskotDataState(
     val albums: List<PhotoAlbum> = emptyList(),
     val reels: List<ReelItem> = emptyList(),
     val adCampaigns: List<AdCampaign> = emptyList(),
+    val liveStreams: List<LiveStreamItem> = emptyList(),
     val isLoading: Boolean = true,
     val errorMessage: String? = null
 )
 
 class MeskotRepository(
-    private val db: FirebaseFirestore
+    private val db: FirebaseFirestore,
+    private val rtdbSource: RealtimeDbSource = RealtimeDbSource()
 ) {
     constructor(context: Context) : this(
         FirebaseFirestore.getInstance(context.getString(R.string.firestore_database_id))
@@ -55,9 +60,79 @@ class MeskotRepository(
     private fun pickAvatarColor(uid: String): Long =
         avatarPalette[kotlin.math.abs(uid.hashCode()) % avatarPalette.size]
 
-    private fun DocumentSnapshot.estimatedMillis(field: String): Long =
-        getTimestamp(field, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-            ?.toDate()?.time ?: System.currentTimeMillis()
+    private fun DocumentSnapshot.flexibleMillis(vararg fields: String): Long {
+        for (field in fields) {
+            val ts = try {
+                getTimestamp(field, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            } catch (_: Exception) {
+                null
+            }
+            if (ts != null) return ts.toDate().time
+            val raw = get(field)
+            if (raw is Number) return raw.toLong()
+            if (raw is Timestamp) return raw.toDate().time
+        }
+        return System.currentTimeMillis()
+    }
+
+    private fun DocumentSnapshot.firstString(vararg fields: String): String? {
+        for (field in fields) {
+            val v = get(field) as? String
+            if (!v.isNullOrBlank()) return v
+        }
+        return null
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun DocumentSnapshot.firstStringList(vararg fields: String): List<String> {
+        for (field in fields) {
+            val v = get(field)
+            if (v is List<*>) return v.mapNotNull { it as? String }
+            if (v is Map<*, *>) return v.keys.mapNotNull { it as? String }
+        }
+        return emptyList()
+    }
+
+    private fun parsePrivacy(raw: String?): PostPrivacy {
+        return when (raw?.trim()?.lowercase()) {
+            "friends", "friends_only" -> PostPrivacy.FRIENDS
+            "only_me", "onlyme", "private", "me" -> PostPrivacy.ONLY_ME
+            else -> PostPrivacy.PUBLIC
+        }
+    }
+
+    private fun parseReaction(raw: Any?): ReactionType? {
+        val s = (raw as? String)?.trim() ?: return null
+        return ReactionType.entries.firstOrNull {
+            it.name.equals(s, ignoreCase = true) || it.emoji == s
+        }
+    }
+
+    private fun parseUserDoc(doc: DocumentSnapshot): UserProfile? {
+        val name = doc.firstString("name", "displayName", "fullName", "username")
+            ?: return null
+        val email = doc.firstString("email") ?: ""
+        val bio = doc.firstString("bio", "about") ?: ""
+        val location = doc.firstString("location", "city") ?: "Addis Ababa, Ethiopia"
+        val avatarColor = (doc.get("avatarColorHex") as? Number)?.toLong() ?: pickAvatarColor(doc.id)
+        val online = (doc.get("online") as? Boolean) ?: (doc.get("isOnline") as? Boolean) ?: false
+        val verified = (doc.get("verified") as? Boolean) ?: (doc.get("isVerified") as? Boolean) ?: false
+        val stars = (doc.get("stars") as? Number)?.toInt() ?: 0
+        val walletEtb = (doc.get("walletEtb") as? Number)?.toDouble() ?: 0.0
+        return UserProfile(
+            uid = doc.id,
+            name = name,
+            email = email,
+            bio = bio,
+            location = location,
+            avatarColorHex = avatarColor,
+            isOnline = online,
+            isVerified = verified,
+            isAdmin = (doc.get("isAdmin") as? Boolean) ?: false,
+            stars = stars,
+            walletEtb = walletEtb
+        )
+    }
 
     // ==================== Profile Bootstrap ====================
 
@@ -67,61 +142,26 @@ class MeskotRepository(
         email: String,
         initialLocation: String = ""
     ): Result<Unit> = runCatching {
+        val userRef = db.collection("users").document(uid)
         val publicRef = db.collection("public_profiles").document(uid)
-        val privateRef = db.collection("users").document(uid)
 
-        val publicSnap = try {
-            publicRef.get().await()
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            handleFirestoreError(e, OperationType.GET, "public_profiles/$uid")
-        }
+        val userSnap = runCatching { userRef.get().await() }.getOrNull()
+        val existingName = userSnap?.firstString("name", "displayName", "fullName")
+        val safeName = (existingName ?: displayName).trim().ifBlank { "Meskot Member" }.take(100)
+        val safeLoc = userSnap?.firstString("location", "city")
+            ?: initialLocation.trim().ifBlank { "Addis Ababa, Ethiopia" }.take(120)
 
-        if (!publicSnap.exists()) {
-            val safeName = displayName.trim().ifBlank { "Meskot Member" }.take(100)
-            val safeLoc = initialLocation.trim().ifBlank { "Addis Ababa, Ethiopia" }.take(120)
+        if (userSnap == null || !userSnap.exists()) {
             val payload = mapOf(
+                "name" to safeName,
                 "displayName" to safeName,
+                "email" to email.take(200),
                 "bio" to "",
                 "location" to safeLoc,
                 "avatarColorHex" to pickAvatarColor(uid),
                 "online" to true,
                 "verified" to false,
                 "stars" to 0,
-                "visibility" to "PUBLIC",
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-            try {
-                publicRef.set(payload).await()
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.CREATE, "public_profiles/$uid")
-            }
-        } else {
-            try {
-                publicRef.update(
-                    mapOf(
-                        "online" to true,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.UPDATE, "public_profiles/$uid")
-            }
-        }
-
-        val privateSnap = try {
-            privateRef.get().await()
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            handleFirestoreError(e, OperationType.GET, "users/$uid")
-        }
-
-        if (!privateSnap.exists()) {
-            val payload = mapOf(
-                "email" to email.take(200),
                 "walletEtb" to 0.0,
                 "friendIds" to emptyList<String>(),
                 "savedPostIds" to emptyList<String>(),
@@ -130,143 +170,210 @@ class MeskotRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            try {
-                privateRef.set(payload).await()
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.CREATE, "users/$uid")
+            runCatching { userRef.set(payload, SetOptions.merge()).await() }
+        } else {
+            runCatching {
+                userRef.set(
+                    mapOf(
+                        "online" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                ).await()
+            }
+        }
+
+        // Also keep public_profiles in sync (best-effort in case backend rules only use /users)
+        runCatching {
+            val pubSnap = publicRef.get().await()
+            if (!pubSnap.exists()) {
+                publicRef.set(
+                    mapOf(
+                        "displayName" to safeName,
+                        "name" to safeName,
+                        "bio" to (userSnap?.firstString("bio", "about") ?: ""),
+                        "location" to safeLoc,
+                        "avatarColorHex" to pickAvatarColor(uid),
+                        "online" to true,
+                        "verified" to false,
+                        "stars" to 0,
+                        "visibility" to "PUBLIC",
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                ).await()
+            } else {
+                publicRef.set(
+                    mapOf("online" to true, "updatedAt" to FieldValue.serverTimestamp()),
+                    SetOptions.merge()
+                ).await()
             }
         }
     }
 
     suspend fun setOnlineStatus(uid: String, online: Boolean): Result<Unit> = runCatching {
-        try {
+        runCatching {
+            db.collection("users").document(uid)
+                .set(mapOf("online" to online, "updatedAt" to FieldValue.serverTimestamp()), SetOptions.merge())
+                .await()
+        }
+        runCatching {
             db.collection("public_profiles").document(uid)
-                .update(
-                    mapOf(
-                        "online" to online,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            handleFirestoreError(e, OperationType.UPDATE, "public_profiles/$uid")
+                .set(mapOf("online" to online, "updatedAt" to FieldValue.serverTimestamp()), SetOptions.merge())
+                .await()
         }
     }
 
     suspend fun updateProfile(uid: String, name: String, bio: String, location: String): Result<Unit> = runCatching {
         val cleanName = name.trim().take(100)
         if (cleanName.isBlank()) throw IllegalArgumentException("Name cannot be blank.")
+        val cleanBio = bio.trim().take(400)
+        val cleanLoc = location.trim().ifBlank { "Addis Ababa, Ethiopia" }.take(120)
+        val updates = mapOf(
+            "name" to cleanName,
+            "displayName" to cleanName,
+            "bio" to cleanBio,
+            "location" to cleanLoc,
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
         try {
-            db.collection("public_profiles").document(uid)
-                .update(
-                    mapOf(
-                        "displayName" to cleanName,
-                        "bio" to bio.trim().take(400),
-                        "location" to location.trim().ifBlank { "Addis Ababa, Ethiopia" }.take(120),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
+            db.collection("users").document(uid).set(updates, SetOptions.merge()).await()
+            runCatching {
+                db.collection("public_profiles").document(uid).set(updates, SetOptions.merge()).await()
+            }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            handleFirestoreError(e, OperationType.UPDATE, "public_profiles/$uid")
+            handleFirestoreError(e, OperationType.UPDATE, "users/$uid")
         }
     }
 
     // ==================== Reactive Firestore Observers ====================
 
-    fun observePublicProfiles(): Flow<Map<String, UserProfile>> =
-        db.collection("public_profiles")
-            .whereEqualTo("visibility", "PUBLIC")
+    fun observeAllUsers(): Flow<Map<String, UserProfile>> {
+        val usersFlow = db.collection("users")
             .snapshots()
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(PublicProfileDoc::class.java) ?: return@mapNotNull null
-                    UserProfile(
-                        uid = doc.id,
-                        name = d.displayName,
-                        email = "",
-                        bio = d.bio,
-                        location = d.location,
-                        avatarColorHex = d.avatarColorHex,
-                        isOnline = d.online,
-                        isVerified = d.verified,
-                        isAdmin = false,
-                        stars = d.stars,
-                        walletEtb = 0.0
-                    )
-                }.associateBy { it.uid }
-            }
+            .map { snapshot -> snapshot.documents.mapNotNull(::parseUserDoc).associateBy { it.uid } }
             .catch { e ->
                 if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "public_profiles")
+                Log.w("MeskotRepo", "users collection listener failed: ${e.message}")
+                emit(emptyMap())
             }
+
+        val publicProfilesFlow = db.collection("public_profiles")
+            .snapshots()
+            .map { snapshot -> snapshot.documents.mapNotNull(::parseUserDoc).associateBy { it.uid } }
+            .catch { e ->
+                if (e is CancellationException) throw e
+                Log.w("MeskotRepo", "public_profiles listener failed: ${e.message}")
+                emit(emptyMap())
+            }
+
+        return combine(publicProfilesFlow, usersFlow, rtdbSource.observeUsers()) { pub, usr, rtdbUsers ->
+            val merged = rtdbUsers.toMutableMap()
+            pub.forEach { (uid, profile) -> merged[uid] = profile }
+            usr.forEach { (uid, profile) ->
+                val existing = merged[uid]
+                merged[uid] = if (existing == null) {
+                    profile
+                } else {
+                    profile.copy(
+                        name = profile.name.ifBlank { existing.name },
+                        bio = profile.bio.ifBlank { existing.bio },
+                        location = profile.location.ifBlank { existing.location }
+                    )
+                }
+            }
+            merged
+        }
+    }
 
     fun observePrivateProfile(uid: String): Flow<UserPrivateProfileDoc?> =
         db.collection("users").document(uid)
             .snapshots()
             .map { doc ->
-                if (!doc.exists()) null else doc.toObject(UserPrivateProfileDoc::class.java)
+                if (!doc.exists()) {
+                    null
+                } else {
+                    UserPrivateProfileDoc(
+                        id = doc.id,
+                        email = doc.firstString("email") ?: "",
+                        walletEtb = (doc.get("walletEtb") as? Number)?.toDouble() ?: 0.0,
+                        friendIds = doc.firstStringList("friendIds", "friends"),
+                        savedPostIds = doc.firstStringList("savedPostIds", "savedPosts"),
+                        hiddenPostIds = doc.firstStringList("hiddenPostIds", "hiddenPosts"),
+                        savedListingIds = doc.firstStringList("savedListingIds", "savedListings")
+                    )
+                }
             }
             .catch { e ->
                 if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.GET, "users/$uid")
+                Log.w("MeskotRepo", "private profile listener failed: ${e.message}")
+                emit(null)
             }
 
-    fun observePublicPosts(): Flow<List<PostItem>> =
-        db.collection("posts")
-            .whereEqualTo("privacy", "PUBLIC")
+    fun observePosts(): Flow<List<PostItem>> {
+        val fsFlow = db.collection("posts")
             .snapshots()
             .map { snapshot -> snapshot.documents.mapNotNull(::parsePostDoc) }
             .catch { e ->
                 if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "posts")
+                Log.w("MeskotRepo", "posts listener failed: ${e.message}")
+                emit(emptyList())
             }
-
-    fun observeMyPosts(uid: String): Flow<List<PostItem>> =
-        db.collection("posts")
-            .whereEqualTo("authorId", uid)
-            .snapshots()
-            .map { snapshot -> snapshot.documents.mapNotNull(::parsePostDoc) }
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "posts")
-            }
+        return combine(fsFlow, rtdbSource.observePosts()) { fs, rtdb ->
+            (rtdb + fs).associateBy { it.id }.values.sortedByDescending { it.timestampMs }
+        }
+    }
 
     @Suppress("UNCHECKED_CAST")
     private fun parsePostDoc(doc: DocumentSnapshot): PostItem? {
-        val authorId = doc.getString("authorId") ?: return null
-        val authorName = doc.getString("authorName") ?: ""
-        val text = doc.getString("text") ?: ""
-        val privacy = PostPrivacy.fromName(doc.getString("privacy"))
-        val bgColorIndex = (doc.getLong("bgColorIndex") ?: 0L).toInt()
-        val imageUri = doc.getString("imageUri")
-        val groupId = doc.getString("groupId")
-        val shareCount = (doc.getLong("shareCount") ?: 0L).toInt()
-        val timestampMs = doc.estimatedMillis("createdAt")
+        val authorId = doc.firstString("authorId", "uid", "userId", "authorUid") ?: return null
+        val authorName = doc.firstString("authorName", "author", "name", "userName", "displayName") ?: "Member"
+        val text = doc.firstString("text", "content", "body", "caption") ?: ""
+        val privacy = parsePrivacy(doc.firstString("privacy", "visibility"))
+        val bgColorIndex = (doc.get("bgColorIndex") as? Number)?.toInt() ?: 0
+        val imageUri = doc.firstString("imageUri", "imageUrl", "image", "photoUrl", "mediaUrl")
+        val groupId = doc.firstString("groupId")
+        val shareCount = (doc.get("shareCount") as? Number)?.toInt()
+            ?: (doc.get("shares") as? Number)?.toInt()
+            ?: 0
+        val timestampMs = doc.flexibleMillis("createdAt", "timestamp", "timestampMs", "ts")
 
         val rawReactions = doc.get("reactions") as? Map<String, Any?> ?: emptyMap()
         val reactions = rawReactions.mapNotNull { (k, v) ->
-            val rt = ReactionType.fromNameOrNull(v as? String)
+            val rt = parseReaction(v)
             if (rt != null) k to rt else null
         }.toMap()
 
         val rawComments = doc.get("comments") as? List<Map<String, Any?>> ?: emptyList()
-        val comments = rawComments.mapNotNull { cm ->
-            val cid = cm["id"] as? String ?: return@mapNotNull null
-            val cAuthorId = cm["authorId"] as? String ?: ""
-            val cAuthorName = cm["authorName"] as? String ?: ""
-            val cText = cm["text"] as? String ?: ""
-            val cTs = (cm["timestampMs"] as? Number)?.toLong() ?: timestampMs
+        val comments = rawComments.mapIndexedNotNull { idx, cm ->
+            val cid = (cm["id"] as? String) ?: "c_${doc.id}_$idx"
+            val cAuthorId = (cm["authorId"] as? String)
+                ?: (cm["uid"] as? String)
+                ?: (cm["userId"] as? String)
+                ?: ""
+            val cAuthorName = (cm["authorName"] as? String)
+                ?: (cm["author"] as? String)
+                ?: (cm["name"] as? String)
+                ?: "Member"
+            val cText = (cm["text"] as? String) ?: (cm["body"] as? String) ?: ""
+            val cTs = (cm["timestampMs"] as? Number)?.toLong()
+                ?: (cm["timestamp"] as? Number)?.toLong()
+                ?: (cm["createdAt"] as? Timestamp)?.toDate()?.time
+                ?: timestampMs
             val rawReplies = cm["replies"] as? List<Map<String, Any?>> ?: emptyList()
-            val replies = rawReplies.mapNotNull { rm ->
-                val rid = rm["id"] as? String ?: return@mapNotNull null
+            val replies = rawReplies.mapIndexedNotNull { rIdx, rm ->
+                val rid = (rm["id"] as? String) ?: "r_${cid}_$rIdx"
                 CommentReply(
                     id = rid,
-                    authorId = rm["authorId"] as? String ?: "",
-                    authorName = rm["authorName"] as? String ?: "",
-                    text = rm["text"] as? String ?: "",
-                    timestampMs = (rm["timestampMs"] as? Number)?.toLong() ?: cTs
+                    authorId = (rm["authorId"] as? String) ?: (rm["uid"] as? String) ?: "",
+                    authorName = (rm["authorName"] as? String) ?: (rm["author"] as? String) ?: (rm["name"] as? String) ?: "Member",
+                    text = (rm["text"] as? String) ?: (rm["body"] as? String) ?: "",
+                    timestampMs = (rm["timestampMs"] as? Number)?.toLong()
+                        ?: (rm["timestamp"] as? Number)?.toLong()
+                        ?: (rm["createdAt"] as? Timestamp)?.toDate()?.time
+                        ?: cTs
                 )
             }
             PostComment(
@@ -279,12 +386,12 @@ class MeskotRepository(
             )
         }
 
-        val sharedOriginalId = doc.getString("sharedPostOriginalId")
+        val sharedOriginalId = doc.firstString("sharedPostOriginalId", "sharedFromId")
         val sharedRef = if (!sharedOriginalId.isNullOrBlank()) {
             SharedPostRef(
                 originalPostId = sharedOriginalId,
-                authorName = doc.getString("sharedPostAuthor") ?: "",
-                text = doc.getString("sharedPostText") ?: ""
+                authorName = doc.firstString("sharedPostAuthor") ?: "",
+                text = doc.firstString("sharedPostText") ?: ""
             )
         } else null
 
@@ -306,211 +413,412 @@ class MeskotRepository(
         )
     }
 
-    fun observeStories(): Flow<List<StoryItem>> =
-        db.collection("stories")
-            .whereEqualTo("visibility", "PUBLIC")
+    fun observeStories(): Flow<List<StoryItem>> {
+        val fsFlow = db.collection("stories")
             .snapshots()
             .map { snapshot ->
                 snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(StoryDoc::class.java) ?: return@mapNotNull null
+                    val authorId = doc.firstString("authorId", "uid", "userId") ?: return@mapNotNull null
                     StoryItem(
                         id = doc.id,
-                        authorId = d.authorId,
-                        authorName = d.authorName,
-                        caption = d.caption,
+                        authorId = authorId,
+                        authorName = doc.firstString("authorName", "author", "name") ?: "Member",
+                        caption = doc.firstString("caption", "text", "title") ?: "",
                         imageRes = null,
-                        bgColorHex = d.bgColorHex,
-                        isLive = d.live,
-                        timestampMs = doc.estimatedMillis("createdAt")
-                    )
-                }.sortedByDescending { it.timestampMs }
-            }
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "stories")
-            }
-
-    fun observeFriendRequests(uid: String): Flow<List<FriendRequest>> =
-        db.collection("friend_requests")
-            .whereArrayContains("participantUids", uid)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(FriendRequestDoc::class.java) ?: return@mapNotNull null
-                    FriendRequest(
-                        id = doc.id,
-                        fromUid = d.fromUid,
-                        toUid = d.toUid,
-                        timestampMs = doc.estimatedMillis("createdAt")
-                    )
-                }.sortedByDescending { it.timestampMs }
-            }
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "friend_requests")
-            }
-
-    fun observeConversations(uid: String): Flow<List<Conversation>> =
-        db.collection("conversations")
-            .whereArrayContains("participantIds", uid)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(ConversationDoc::class.java) ?: return@mapNotNull null
-                    Conversation(
-                        id = doc.id,
-                        participantIds = d.participantIds,
-                        messages = emptyList(),
-                        lastMessage = d.lastMessage,
-                        updatedAtMs = doc.estimatedMillis("updatedAt"),
-                        unreadCount = 0
-                    )
-                }.sortedByDescending { it.updatedAtMs }
-            }
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "conversations")
-            }
-
-    fun observeMessages(convoId: String, uid: String): Flow<List<ChatMessage>> =
-        db.collection("conversations").document(convoId)
-            .collection("messages")
-            .whereArrayContains("participantIds", uid)
-            .snapshots()
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(ChatMessageDoc::class.java) ?: return@mapNotNull null
-                    ChatMessage(
-                        id = doc.id,
-                        senderId = d.senderId,
-                        text = d.text,
-                        timestampMs = doc.estimatedMillis("createdAt"),
-                        isEdited = d.edited
-                    )
-                }.sortedBy { it.timestampMs }
-            }
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "conversations/$convoId/messages")
-            }
-
-    fun observeGroups(): Flow<List<GroupItem>> =
-        db.collection("groups")
-            .whereEqualTo("visibility", "PUBLIC")
-            .snapshots()
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(GroupDoc::class.java) ?: return@mapNotNull null
-                    GroupItem(
-                        id = doc.id,
-                        name = d.name,
-                        description = d.description,
-                        coverColorHex = d.coverColorHex,
-                        memberIds = d.memberIds.toSet(),
-                        creatorId = d.creatorId
+                        bgColorHex = (doc.get("bgColorHex") as? Number)?.toLong() ?: 0xFFEE4C04L,
+                        isLive = (doc.get("live") as? Boolean) ?: (doc.get("isLive") as? Boolean) ?: false,
+                        timestampMs = doc.flexibleMillis("createdAt", "timestamp", "timestampMs")
                     )
                 }
             }
             .catch { e ->
                 if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "groups")
+                Log.w("MeskotRepo", "stories listener failed: ${e.message}")
+                emit(emptyList())
+            }
+        return combine(fsFlow, rtdbSource.observeStories()) { fs, rtdb ->
+            (rtdb + fs).associateBy { it.id }.values.sortedByDescending { it.timestampMs }
+        }
+    }
+
+    fun observeFriendsAndFollowers(uid: String): Flow<Set<String>> {
+        val flows = listOf(
+            db.collection("users").document(uid).collection("friends").snapshots()
+                .map { s -> s.documents.map { it.id }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            db.collection("users").document(uid).collection("followers").snapshots()
+                .map { s -> s.documents.map { it.id }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            db.collection("users").document(uid).collection("following").snapshots()
+                .map { s -> s.documents.map { it.id }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            db.collection("followers").whereEqualTo("followerId", uid).snapshots()
+                .map { s -> s.documents.mapNotNull { it.firstString("followingId", "targetId", "toUid", "to") }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            db.collection("followers").whereEqualTo("followingId", uid).snapshots()
+                .map { s -> s.documents.mapNotNull { it.firstString("followerId", "fromUid", "from", "uid") }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            db.collection("follows").whereEqualTo("followerId", uid).snapshots()
+                .map { s -> s.documents.mapNotNull { it.firstString("followingId", "targetId", "toUid", "to") }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            db.collection("follows").whereEqualTo("followingId", uid).snapshots()
+                .map { s -> s.documents.mapNotNull { it.firstString("followerId", "fromUid", "from", "uid") }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            db.collection("friends").whereArrayContains("users", uid).snapshots()
+                .map { s -> s.documents.flatMap { it.firstStringList("users") }.filter { it != uid }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            db.collection("friendships").whereArrayContains("users", uid).snapshots()
+                .map { s -> s.documents.flatMap { it.firstStringList("users") }.filter { it != uid }.toSet() }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptySet()) },
+            rtdbSource.observeFriendsAndFollowers(uid)
+        )
+        return combine(flows) { sets ->
+            val all = mutableSetOf<String>()
+            sets.forEach { all.addAll(it) }
+            all.remove(uid)
+            all
+        }
+    }
+
+    fun observeFriendRequests(uid: String): Flow<List<FriendRequest>> {
+        fun parseList(docs: List<DocumentSnapshot>): List<FriendRequest> =
+            docs.mapNotNull { doc ->
+                val fromUid = doc.firstString("fromUid", "from", "senderId", "uid") ?: return@mapNotNull null
+                val toUid = doc.firstString("toUid", "to", "receiverId", "targetUid") ?: return@mapNotNull null
+                if (fromUid != uid && toUid != uid) return@mapNotNull null
+                FriendRequest(
+                    id = doc.id,
+                    fromUid = fromUid,
+                    toUid = toUid,
+                    timestampMs = doc.flexibleMillis("createdAt", "timestamp", "timestampMs", "ts")
+                )
             }
 
-    fun observeListings(): Flow<List<MarketListing>> =
-        db.collection("listings")
-            .whereEqualTo("visibility", "PUBLIC")
+        fun safeQuery(query: com.google.firebase.firestore.Query): Flow<List<FriendRequest>> =
+            query.snapshots()
+                .map { parseList(it.documents) }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        val flows = listOf(
+            safeQuery(db.collection("friend_requests").whereArrayContains("participantUids", uid)),
+            safeQuery(db.collection("friend_requests").whereEqualTo("toUid", uid)),
+            safeQuery(db.collection("friend_requests").whereEqualTo("fromUid", uid)),
+            safeQuery(db.collection("friend_requests").whereEqualTo("to", uid)),
+            safeQuery(db.collection("friend_requests").whereEqualTo("from", uid)),
+            safeQuery(db.collection("friendRequests").whereEqualTo("toUid", uid)),
+            safeQuery(db.collection("friendRequests").whereEqualTo("fromUid", uid)),
+            safeQuery(db.collection("friendRequests").whereEqualTo("to", uid)),
+            safeQuery(db.collection("friendRequests").whereEqualTo("from", uid)),
+            rtdbSource.observeFriendRequests(uid)
+        )
+
+        return combine(flows) { lists ->
+            lists.flatMap { it }
+                .associateBy { "${it.fromUid}_${it.toUid}" }
+                .values
+                .sortedByDescending { it.timestampMs }
+        }
+    }
+
+    fun observeConversations(uid: String): Flow<List<Conversation>> {
+        fun parseConvo(doc: DocumentSnapshot): Conversation? {
+            val participants = doc.firstStringList("participantIds", "participants", "members", "users", "uids", "participantUids")
+                .ifEmpty {
+                    listOfNotNull(
+                        doc.firstString("user1", "from", "fromUid", "senderId"),
+                        doc.firstString("user2", "to", "toUid", "receiverId")
+                    )
+                }
+                .ifEmpty { doc.id.split("_").filter { it.isNotBlank() } }
+            if (uid !in participants) return null
+            return Conversation(
+                id = doc.id,
+                participantIds = participants,
+                messages = emptyList(),
+                lastMessage = doc.firstString("lastMessage", "lastText", "preview", "text") ?: "",
+                updatedAtMs = doc.flexibleMillis("updatedAt", "lastMessageAt", "createdAt", "timestamp", "ts"),
+                unreadCount = (doc.get("unreadCount") as? Number)?.toInt() ?: 0
+            )
+        }
+
+        fun safeConvoQuery(query: com.google.firebase.firestore.Query): Flow<List<Conversation>> =
+            query.snapshots()
+                .map { it.documents.mapNotNull(::parseConvo) }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        fun safeTopMsgQuery(query: com.google.firebase.firestore.Query): Flow<List<Conversation>> =
+            query.snapshots()
+                .map { snap ->
+                    val grouped = linkedMapOf<String, MutableList<ChatMessage>>()
+                    val partMap = linkedMapOf<String, List<String>>()
+                    snap.documents.forEach { doc ->
+                        val from = doc.firstString("senderId", "from", "fromUid", "uid") ?: return@forEach
+                        val to = doc.firstString("receiverId", "to", "toUid") ?: return@forEach
+                        if (from != uid && to != uid) return@forEach
+                        val parts = listOf(from, to).sorted()
+                        val cid = doc.firstString("conversationId", "chatId", "convoId") ?: "${parts[0]}_${parts[1]}"
+                        partMap[cid] = parts
+                        grouped.getOrPut(cid) { mutableListOf() }.add(
+                            ChatMessage(
+                                id = doc.id,
+                                senderId = from,
+                                text = doc.firstString("text", "message", "body", "content") ?: "",
+                                timestampMs = doc.flexibleMillis("createdAt", "timestamp", "timestampMs", "ts"),
+                                isEdited = (doc.get("edited") as? Boolean) ?: (doc.get("isEdited") as? Boolean) ?: false
+                            )
+                        )
+                    }
+                    grouped.map { (cid, msgs) ->
+                        val sorted = msgs.sortedBy { it.timestampMs }
+                        Conversation(
+                            id = cid,
+                            participantIds = partMap[cid] ?: emptyList(),
+                            messages = sorted,
+                            lastMessage = sorted.lastOrNull()?.text ?: "",
+                            updatedAtMs = sorted.lastOrNull()?.timestampMs ?: 0L
+                        )
+                    }
+                }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        val flows = listOf(
+            safeConvoQuery(db.collection("conversations").whereArrayContains("participantIds", uid)),
+            safeConvoQuery(db.collection("conversations").whereArrayContains("participants", uid)),
+            safeConvoQuery(db.collection("conversations").whereArrayContains("members", uid)),
+            safeConvoQuery(db.collection("conversations").whereArrayContains("users", uid)),
+            safeConvoQuery(db.collection("chats").whereArrayContains("participantIds", uid)),
+            safeConvoQuery(db.collection("chats").whereArrayContains("participants", uid)),
+            safeConvoQuery(db.collection("chats").whereArrayContains("members", uid)),
+            safeConvoQuery(db.collection("chats").whereArrayContains("users", uid)),
+            safeTopMsgQuery(db.collection("messages").whereEqualTo("from", uid)),
+            safeTopMsgQuery(db.collection("messages").whereEqualTo("to", uid)),
+            safeTopMsgQuery(db.collection("messages").whereEqualTo("senderId", uid)),
+            safeTopMsgQuery(db.collection("messages").whereEqualTo("receiverId", uid)),
+            rtdbSource.observeConversations(uid)
+        )
+
+        return combine(flows) { lists ->
+            val merged = linkedMapOf<String, Conversation>()
+            lists.flatMap { it }.forEach { convo ->
+                val existing = merged[convo.id]
+                merged[convo.id] = if (existing == null) {
+                    convo
+                } else {
+                    val combinedMsgs = (existing.messages + convo.messages)
+                        .associateBy { it.id }.values.sortedBy { it.timestampMs }
+                    convo.copy(
+                        messages = combinedMsgs,
+                        lastMessage = convo.lastMessage.ifBlank { existing.lastMessage },
+                        updatedAtMs = maxOf(convo.updatedAtMs, existing.updatedAtMs)
+                    )
+                }
+            }
+            merged.values.sortedByDescending { it.updatedAtMs }
+        }
+    }
+
+    fun observeMessages(convoId: String): Flow<List<ChatMessage>> {
+        fun parseMsg(doc: DocumentSnapshot): ChatMessage? {
+            val senderId = doc.firstString("senderId", "from", "fromUid", "uid") ?: return null
+            val text = doc.firstString("text", "message", "body", "content") ?: ""
+            return ChatMessage(
+                id = doc.id,
+                senderId = senderId,
+                text = text,
+                timestampMs = doc.flexibleMillis("createdAt", "timestamp", "timestampMs", "ts"),
+                isEdited = (doc.get("edited") as? Boolean) ?: (doc.get("isEdited") as? Boolean) ?: false
+            )
+        }
+
+        fun safeMsgQuery(query: com.google.firebase.firestore.Query): Flow<List<ChatMessage>> =
+            query.snapshots()
+                .map { it.documents.mapNotNull(::parseMsg) }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        val flows = listOf(
+            safeMsgQuery(db.collection("conversations").document(convoId).collection("messages")),
+            safeMsgQuery(db.collection("chats").document(convoId).collection("messages")),
+            safeMsgQuery(db.collection("messages").whereEqualTo("conversationId", convoId)),
+            safeMsgQuery(db.collection("messages").whereEqualTo("chatId", convoId)),
+            safeMsgQuery(db.collection("messages").whereEqualTo("convoId", convoId)),
+            rtdbSource.observeMessages(convoId)
+        )
+
+        return combine(flows) { lists ->
+            lists.flatMap { it }.associateBy { it.id }.values.sortedBy { it.timestampMs }
+        }
+    }
+
+    fun observeGroups(): Flow<List<GroupItem>> {
+        val fsFlow = db.collection("groups")
             .snapshots()
             .map { snapshot ->
                 snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(MarketListingDoc::class.java) ?: return@mapNotNull null
-                    MarketListing(
+                    val name = doc.firstString("name", "title") ?: return@mapNotNull null
+                    GroupItem(
                         id = doc.id,
-                        sellerId = d.sellerId,
-                        sellerName = d.sellerName,
-                        title = d.title,
-                        priceEtb = d.priceEtb,
-                        category = d.category,
-                        city = d.city,
-                        description = d.description,
-                        imageRes = null,
-                        timestampMs = doc.estimatedMillis("createdAt")
+                        name = name,
+                        description = doc.firstString("description", "desc", "about") ?: "",
+                        coverColorHex = (doc.get("coverColorHex") as? Number)?.toLong() ?: pickAvatarColor(doc.id),
+                        memberIds = doc.firstStringList("memberIds", "members").toSet(),
+                        creatorId = doc.firstString("creatorId", "ownerId", "createdBy") ?: ""
                     )
-                }.sortedByDescending { it.timestampMs }
+                }
             }
             .catch { e ->
                 if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "listings")
+                Log.w("MeskotRepo", "groups listener failed: ${e.message}")
+                emit(emptyList())
             }
+        return combine(fsFlow, rtdbSource.observeGroups()) { fs, rtdb ->
+            (rtdb + fs).associateBy { it.id }.values.toList()
+        }
+    }
 
-    fun observeNotifications(uid: String): Flow<List<NotificationItem>> =
-        db.collection("users").document(uid)
-            .collection("notifications")
-            .snapshots()
-            .map { snapshot ->
-                snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(NotificationDoc::class.java) ?: return@mapNotNull null
-                    NotificationItem(
-                        id = doc.id,
-                        actorId = d.actorId,
-                        actorName = d.actorName,
-                        type = d.type,
-                        targetId = d.targetId,
-                        messageEn = d.messageEn,
-                        messageAm = d.messageAm,
-                        timestampMs = doc.estimatedMillis("createdAt"),
-                        isRead = d.read
-                    )
-                }.sortedByDescending { it.timestampMs }
-            }
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "users/$uid/notifications")
-            }
+    fun observeListings(): Flow<List<MarketListing>> {
+        fun parseListing(doc: DocumentSnapshot): MarketListing? {
+            val title = doc.firstString("title", "name") ?: return null
+            return MarketListing(
+                id = doc.id,
+                sellerId = doc.firstString("sellerId", "uid", "userId", "ownerId") ?: "",
+                sellerName = doc.firstString("sellerName", "seller", "authorName", "name") ?: "Seller",
+                title = title,
+                priceEtb = (doc.get("priceEtb") as? Number)?.toDouble()
+                    ?: (doc.get("price") as? Number)?.toDouble()
+                    ?: 0.0,
+                category = doc.firstString("category") ?: "General",
+                city = doc.firstString("city", "location") ?: "Addis Ababa",
+                description = doc.firstString("description", "desc") ?: "",
+                imageRes = null,
+                timestampMs = doc.flexibleMillis("createdAt", "timestamp", "timestampMs")
+            )
+        }
 
-    fun observeAlbums(uid: String): Flow<List<PhotoAlbum>> =
-        db.collection("users").document(uid)
+        val listingsFlow = db.collection("listings").snapshots()
+            .map { it.documents.mapNotNull(::parseListing) }
+            .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        val marketFlow = db.collection("marketplace").snapshots()
+            .map { it.documents.mapNotNull(::parseListing) }
+            .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        return combine(listingsFlow, marketFlow, rtdbSource.observeListings()) { a, b, c ->
+            (c + b + a).associateBy { it.id }.values.sortedByDescending { it.timestampMs }
+        }
+    }
+
+    fun observeNotifications(uid: String): Flow<List<NotificationItem>> {
+        fun parseNotif(doc: DocumentSnapshot): NotificationItem? {
+            val type = doc.firstString("type") ?: "info"
+            val msg = doc.firstString("messageEn", "message", "text", "body", "title", "content")
+                ?: when (type.lowercase()) {
+                    "like", "react" -> "reacted to your post"
+                    "comment" -> "commented on your post"
+                    "friend_req", "friend_request" -> "sent you a friend request"
+                    "friend_accept" -> "accepted your friend request"
+                    "follow" -> "started following you"
+                    "message" -> "sent you a message"
+                    else -> "interacted with you"
+                }
+            return NotificationItem(
+                id = doc.id,
+                actorId = doc.firstString("actorId", "fromUid", "from", "senderId") ?: "",
+                actorName = doc.firstString("actorName", "fromName", "authorName", "senderName", "name") ?: "Member",
+                type = type,
+                targetId = doc.firstString("targetId", "postId", "convoId"),
+                messageEn = msg,
+                messageAm = doc.firstString("messageAm") ?: msg,
+                timestampMs = doc.flexibleMillis("createdAt", "timestamp", "timestampMs", "ts"),
+                isRead = (doc.get("read") as? Boolean) ?: (doc.get("isRead") as? Boolean) ?: false
+            )
+        }
+
+        fun safeNotifQuery(query: com.google.firebase.firestore.Query): Flow<List<NotificationItem>> =
+            query.snapshots()
+                .map { snap -> snap.documents.mapNotNull(::parseNotif) }
+                .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        val flows = listOf(
+            safeNotifQuery(db.collection("users").document(uid).collection("notifications")),
+            safeNotifQuery(db.collection("notifications").whereEqualTo("toUid", uid)),
+            safeNotifQuery(db.collection("notifications").whereEqualTo("to", uid)),
+            safeNotifQuery(db.collection("notifications").whereEqualTo("userId", uid)),
+            safeNotifQuery(db.collection("notifications").whereEqualTo("uid", uid)),
+            safeNotifQuery(db.collection("notifications").whereEqualTo("recipientId", uid)),
+            rtdbSource.observeNotifications(uid)
+        )
+
+        return combine(flows) { lists ->
+            lists.flatMap { it }.associateBy { it.id }.values.sortedByDescending { it.timestampMs }
+        }
+    }
+
+    fun observeAlbums(uid: String): Flow<List<PhotoAlbum>> {
+        val nestedFlow = db.collection("users").document(uid)
             .collection("albums")
             .snapshots()
             .map { snapshot ->
                 snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(PhotoAlbumDoc::class.java) ?: return@mapNotNull null
+                    val title = doc.firstString("title", "name") ?: return@mapNotNull null
                     PhotoAlbum(
                         id = doc.id,
-                        ownerId = d.ownerId,
-                        title = d.title,
+                        ownerId = doc.firstString("ownerId", "uid") ?: uid,
+                        title = title,
                         photos = emptyList(),
-                        photoUris = d.photoUris
+                        photoUris = doc.firstStringList("photoUris", "photos")
                     )
                 }
             }
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "users/$uid/albums")
-            }
+            .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
 
-    fun observeReels(currentUid: String): Flow<List<ReelItem>> =
-        db.collection("reels")
-            .whereEqualTo("visibility", "PUBLIC")
+        val topFlow = db.collection("albums")
             .snapshots()
             .map { snapshot ->
                 snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(ReelDoc::class.java) ?: return@mapNotNull null
-                    ReelItem(
+                    val owner = doc.firstString("ownerId", "uid", "userId")
+                    if (owner != uid) return@mapNotNull null
+                    val title = doc.firstString("title", "name") ?: return@mapNotNull null
+                    PhotoAlbum(
                         id = doc.id,
-                        authorId = d.authorId,
-                        authorName = d.authorName,
-                        caption = d.caption,
-                        coverRes = null,
-                        likes = d.likedBy.size,
-                        isLiked = currentUid in d.likedBy,
-                        comments = d.comments
+                        ownerId = uid,
+                        title = title,
+                        photos = emptyList(),
+                        photoUris = doc.firstStringList("photoUris", "photos")
                     )
                 }
             }
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "reels")
+            .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        return combine(nestedFlow, topFlow, rtdbSource.observeAlbums(uid)) { a, b, c ->
+            (c + b + a).associateBy { it.id }.values.toList()
+        }
+    }
+
+    fun observeReels(currentUid: String): Flow<List<ReelItem>> {
+        val fsFlow = db.collection("reels")
+            .snapshots()
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { doc ->
+                    val caption = doc.firstString("caption", "text", "title") ?: return@mapNotNull null
+                    val likedBy = doc.firstStringList("likedBy", "likes")
+                    ReelItem(
+                        id = doc.id,
+                        authorId = doc.firstString("authorId", "uid") ?: "",
+                        authorName = doc.firstString("authorName", "author", "name") ?: "Member",
+                        caption = caption,
+                        coverRes = null,
+                        likes = likedBy.size,
+                        isLiked = currentUid in likedBy,
+                        comments = doc.firstStringList("comments")
+                    )
+                }
             }
+            .catch { e -> if (e is CancellationException) throw e; emit(emptyList()) }
+
+        return combine(fsFlow, rtdbSource.observeReels(currentUid)) { fs, rtdb ->
+            (rtdb + fs).associateBy { it.id }.values.toList()
+        }
+    }
 
     fun observeAdCampaigns(uid: String): Flow<List<AdCampaign>> =
         db.collection("users").document(uid)
@@ -518,22 +826,22 @@ class MeskotRepository(
             .snapshots()
             .map { snapshot ->
                 snapshot.documents.mapNotNull { doc ->
-                    val d = doc.toObject(AdCampaignDoc::class.java) ?: return@mapNotNull null
+                    val title = doc.firstString("title", "name") ?: return@mapNotNull null
                     AdCampaign(
                         id = doc.id,
-                        title = d.title,
-                        objective = d.objective,
-                        budgetEtb = d.budgetEtb,
-                        days = d.days,
-                        impressions = d.impressions,
-                        clicks = d.clicks,
-                        active = d.active
+                        title = title,
+                        objective = doc.firstString("objective") ?: "Engagement",
+                        budgetEtb = (doc.get("budgetEtb") as? Number)?.toDouble() ?: 0.0,
+                        days = (doc.get("days") as? Number)?.toInt() ?: 7,
+                        impressions = (doc.get("impressions") as? Number)?.toInt() ?: 0,
+                        clicks = (doc.get("clicks") as? Number)?.toInt() ?: 0,
+                        active = (doc.get("active") as? Boolean) ?: true
                     )
                 }
             }
             .catch { e ->
                 if (e is CancellationException) throw e
-                handleFirestoreError(e, OperationType.LIST, "users/$uid/ad_campaigns")
+                emit(emptyList())
             }
 
     // ==================== Mutations ====================
@@ -550,6 +858,7 @@ class MeskotRepository(
         val docRef = db.collection("posts").document()
         val payload = mapOf<String, Any?>(
             "authorId" to authorId,
+            "uid" to authorId,
             "authorName" to authorName.ifBlank { "Meskot Member" }.take(100),
             "text" to text.trim().take(4000),
             "privacy" to privacy.name,
@@ -692,6 +1001,7 @@ class MeskotRepository(
         val docRef = db.collection("posts").document()
         val payload = mapOf(
             "authorId" to authorId,
+            "uid" to authorId,
             "authorName" to authorName.ifBlank { "Meskot Member" }.take(100),
             "text" to "",
             "privacy" to PostPrivacy.PUBLIC.name,
@@ -726,11 +1036,12 @@ class MeskotRepository(
         val next = if (postId in currentSaved) currentSaved - postId else currentSaved + postId
         try {
             db.collection("users").document(uid)
-                .update(
+                .set(
                     mapOf(
                         "savedPostIds" to next.toList(),
                         "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                    ),
+                    SetOptions.merge()
                 ).await()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -742,11 +1053,12 @@ class MeskotRepository(
         val next = currentHidden + postId
         try {
             db.collection("users").document(uid)
-                .update(
+                .set(
                     mapOf(
                         "hiddenPostIds" to next.toList(),
                         "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                    ),
+                    SetOptions.merge()
                 ).await()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -765,6 +1077,7 @@ class MeskotRepository(
         val docRef = db.collection("stories").document()
         val payload = mapOf(
             "authorId" to authorId,
+            "uid" to authorId,
             "authorName" to authorName.ifBlank { "Meskot Member" }.take(100),
             "caption" to clean,
             "bgColorHex" to bgColorHex,
@@ -791,19 +1104,21 @@ class MeskotRepository(
         )
         try {
             db.collection("friend_requests").document(reqId).set(payload).await()
-            val notifRef = db.collection("users").document(toUid).collection("notifications").document()
-            notifRef.set(
-                mapOf(
-                    "actorId" to fromUid,
-                    "actorName" to fromName.ifBlank { "Meskot Member" }.take(100),
-                    "type" to "friend_req",
-                    "targetId" to fromUid,
-                    "messageEn" to "sent you a friend request",
-                    "messageAm" to "የጓደኝነት ጥያቄ ላከልዎት",
-                    "read" to false,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            runCatching {
+                val notifRef = db.collection("users").document(toUid).collection("notifications").document()
+                notifRef.set(
+                    mapOf(
+                        "actorId" to fromUid,
+                        "actorName" to fromName.ifBlank { "Meskot Member" }.take(100),
+                        "type" to "friend_req",
+                        "targetId" to fromUid,
+                        "messageEn" to "sent you a friend request",
+                        "messageAm" to "የጓደኝነት ጥያቄ ላከልዎት",
+                        "read" to false,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             handleFirestoreError(e, OperationType.CREATE, "friend_requests/$reqId")
@@ -812,25 +1127,23 @@ class MeskotRepository(
 
     suspend fun cancelFriendRequest(fromUid: String, toUid: String): Result<Unit> = runCatching {
         val reqId = "${fromUid}_${toUid}"
-        try {
-            db.collection("friend_requests").document(reqId).delete().await()
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            handleFirestoreError(e, OperationType.DELETE, "friend_requests/$reqId")
-        }
+        runCatching { db.collection("friend_requests").document(reqId).delete().await() }
+        runCatching { db.collection("friendRequests").document(reqId).delete().await() }
     }
 
     suspend fun acceptFriendRequest(myUid: String, myFriends: Set<String>, fromUid: String): Result<Unit> = runCatching {
         val reqId = "${fromUid}_${myUid}"
         val updatedFriends = (myFriends + fromUid).toList()
+        runCatching { db.collection("friend_requests").document(reqId).delete().await() }
+        runCatching { db.collection("friendRequests").document(reqId).delete().await() }
         try {
-            db.collection("friend_requests").document(reqId).delete().await()
             db.collection("users").document(myUid)
-                .update(
+                .set(
                     mapOf(
                         "friendIds" to updatedFriends,
                         "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                    ),
+                    SetOptions.merge()
                 ).await()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -840,23 +1153,20 @@ class MeskotRepository(
 
     suspend fun declineFriendRequest(myUid: String, fromUid: String): Result<Unit> = runCatching {
         val reqId = "${fromUid}_${myUid}"
-        try {
-            db.collection("friend_requests").document(reqId).delete().await()
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            handleFirestoreError(e, OperationType.DELETE, "friend_requests/$reqId")
-        }
+        runCatching { db.collection("friend_requests").document(reqId).delete().await() }
+        runCatching { db.collection("friendRequests").document(reqId).delete().await() }
     }
 
     suspend fun unfriend(myUid: String, myFriends: Set<String>, targetUid: String): Result<Unit> = runCatching {
         val updated = (myFriends - targetUid).toList()
         try {
             db.collection("users").document(myUid)
-                .update(
+                .set(
                     mapOf(
                         "friendIds" to updated,
                         "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                    ),
+                    SetOptions.merge()
                 ).await()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -874,6 +1184,7 @@ class MeskotRepository(
                 ref.set(
                     mapOf(
                         "participantIds" to participants,
+                        "participants" to participants,
                         "lastMessage" to "",
                         "createdAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
@@ -908,11 +1219,14 @@ class MeskotRepository(
                 )
             ).await()
             db.collection("conversations").document(convoId)
-                .update(
+                .set(
                     mapOf(
+                        "participantIds" to participantIds,
+                        "participants" to participantIds,
                         "lastMessage" to clean,
                         "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                    ),
+                    SetOptions.merge()
                 ).await()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -1025,11 +1339,12 @@ class MeskotRepository(
         val next = if (listingId in currentSaved) currentSaved - listingId else currentSaved + listingId
         try {
             db.collection("users").document(uid)
-                .update(
+                .set(
                     mapOf(
                         "savedListingIds" to next.toList(),
                         "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                    ),
+                    SetOptions.merge()
                 ).await()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -1154,6 +1469,229 @@ class MeskotRepository(
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             handleFirestoreError(e, OperationType.CREATE, "users/$ownerId/ad_campaigns/${docRef.id}")
+        }
+    }
+
+    // ==================== Live Streaming ====================
+
+    private fun parseLiveStreamDoc(doc: DocumentSnapshot): LiveStreamItem? {
+        val hostId = doc.firstString("hostId", "authorId", "uid", "userId") ?: return null
+        val status = doc.firstString("status")?.lowercase()
+        val isLiveFlag = (doc.get("isLive") as? Boolean)
+            ?: (doc.get("live") as? Boolean)
+            ?: (doc.get("active") as? Boolean)
+            ?: (status != "ended")
+        if (!isLiveFlag || status == "ended") return null
+        return LiveStreamItem(
+            id = doc.id,
+            hostId = hostId,
+            hostName = doc.firstString("hostName", "authorName", "name", "displayName") ?: "Member",
+            title = doc.firstString("title", "caption", "topic") ?: "Live on Meskot",
+            category = doc.firstString("category") ?: "General",
+            privacy = parsePrivacy(doc.firstString("privacy", "visibility")),
+            isLive = true,
+            viewerCount = ((doc.get("viewerCount") as? Number) ?: (doc.get("viewers") as? Number) ?: 1).toInt().coerceAtLeast(1),
+            reactionsCount = ((doc.get("reactionsCount") as? Number) ?: (doc.get("reactions") as? Number) ?: 0).toInt(),
+            starsEarned = ((doc.get("starsEarned") as? Number) ?: (doc.get("stars") as? Number) ?: 0).toInt(),
+            startedAtMs = doc.flexibleMillis("startedAt", "createdAt", "timestamp"),
+            coverColorHex = (doc.get("coverColorHex") as? Number)?.toLong()
+                ?: (doc.get("bgColorHex") as? Number)?.toLong()
+                ?: pickAvatarColor(hostId)
+        )
+    }
+
+    fun observeLiveStreams(): Flow<List<LiveStreamItem>> {
+        val fs1 = db.collection("live_streams").snapshots()
+            .map { snap -> snap.documents.mapNotNull(::parseLiveStreamDoc) }
+            .catch { emit(emptyList()) }
+        val fs2 = db.collection("lives").snapshots()
+            .map { snap -> snap.documents.mapNotNull(::parseLiveStreamDoc) }
+            .catch { emit(emptyList()) }
+        val fs3 = db.collection("liveStreams").snapshots()
+            .map { snap -> snap.documents.mapNotNull(::parseLiveStreamDoc) }
+            .catch { emit(emptyList()) }
+        val rtdb = rtdbSource.observeLiveStreams().catch { emit(emptyList()) }
+        return combine(fs1, fs2, fs3, rtdb) { a, b, c, d ->
+            (a + b + c + d)
+                .associateBy { it.id }
+                .values
+                .filter { it.isLive }
+                .sortedByDescending { it.startedAtMs }
+        }
+    }
+
+    fun observeLiveComments(streamId: String): Flow<List<LiveComment>> {
+        fun parseCommentDoc(doc: DocumentSnapshot): LiveComment? {
+            val text = doc.firstString("text", "message", "body") ?: return null
+            return LiveComment(
+                id = doc.id,
+                authorId = doc.firstString("authorId", "uid", "senderId") ?: "",
+                authorName = doc.firstString("authorName", "senderName", "name") ?: "Viewer",
+                text = text,
+                isGift = (doc.get("isGift") as? Boolean) ?: (doc.get("gift") as? Boolean) ?: false,
+                giftEmoji = doc.firstString("giftEmoji", "emoji"),
+                timestampMs = doc.flexibleMillis("createdAt", "timestamp", "ts")
+            )
+        }
+        val fs1 = db.collection("live_streams").document(streamId).collection("comments").snapshots()
+            .map { snap -> snap.documents.mapNotNull(::parseCommentDoc) }
+            .catch { emit(emptyList()) }
+        val fs2 = db.collection("lives").document(streamId).collection("comments").snapshots()
+            .map { snap -> snap.documents.mapNotNull(::parseCommentDoc) }
+            .catch { emit(emptyList()) }
+        val rtdb = rtdbSource.observeLiveComments(streamId).catch { emit(emptyList()) }
+        return combine(fs1, fs2, rtdb) { a, b, c ->
+            (a + b + c).associateBy { it.id }.values.sortedBy { it.timestampMs }
+        }
+    }
+
+    suspend fun startLiveStream(
+        hostId: String,
+        hostName: String,
+        title: String,
+        category: String,
+        privacy: PostPrivacy
+    ): Result<LiveStreamItem> = runCatching {
+        val cleanTitle = title.trim().ifBlank { "$hostName is Live on Meskot" }.take(140)
+        val docRef = db.collection("live_streams").document()
+        val now = System.currentTimeMillis()
+        val color = pickAvatarColor(hostId)
+        val item = LiveStreamItem(
+            id = docRef.id,
+            hostId = hostId,
+            hostName = hostName,
+            title = cleanTitle,
+            category = category.ifBlank { "General" },
+            privacy = privacy,
+            isLive = true,
+            viewerCount = 1,
+            reactionsCount = 0,
+            starsEarned = 0,
+            startedAtMs = now,
+            coverColorHex = color
+        )
+        runCatching {
+            docRef.set(
+                mapOf(
+                    "hostId" to hostId,
+                    "hostName" to hostName,
+                    "title" to cleanTitle,
+                    "category" to item.category,
+                    "privacy" to privacy.name,
+                    "visibility" to privacy.name,
+                    "isLive" to true,
+                    "live" to true,
+                    "status" to "live",
+                    "viewerCount" to 1,
+                    "reactionsCount" to 0,
+                    "starsEarned" to 0,
+                    "coverColorHex" to color,
+                    "startedAt" to FieldValue.serverTimestamp(),
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }
+        // Also publish a LIVE story tile so it appears immediately in the Feed's LIVE strip
+        runCatching {
+            db.collection("stories").document(docRef.id).set(
+                mapOf(
+                    "authorId" to hostId,
+                    "authorName" to hostName,
+                    "caption" to cleanTitle,
+                    "bgColorHex" to color,
+                    "live" to true,
+                    "isLive" to true,
+                    "visibility" to privacy.name,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }
+        rtdbSource.writeLiveStream(item)
+        item
+    }
+
+    suspend fun endLiveStream(streamId: String): Result<Unit> = runCatching {
+        runCatching {
+            db.collection("live_streams").document(streamId).update(
+                mapOf(
+                    "isLive" to false,
+                    "live" to false,
+                    "status" to "ended",
+                    "endedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }
+        runCatching {
+            db.collection("stories").document(streamId).update(
+                mapOf("live" to false, "isLive" to false)
+            ).await()
+        }
+        rtdbSource.endLiveStream(streamId)
+    }
+
+    suspend fun adjustLiveViewerCount(streamId: String, delta: Long): Result<Unit> = runCatching {
+        runCatching {
+            db.collection("live_streams").document(streamId)
+                .update("viewerCount", FieldValue.increment(delta))
+                .await()
+        }
+    }
+
+    suspend fun sendLiveComment(
+        streamId: String,
+        authorId: String,
+        authorName: String,
+        text: String,
+        isGift: Boolean = false,
+        giftEmoji: String? = null
+    ): Result<Unit> = runCatching {
+        val clean = text.trim().take(300)
+        if (clean.isBlank()) return@runCatching
+        val docRef = db.collection("live_streams").document(streamId).collection("comments").document()
+        val comment = LiveComment(
+            id = docRef.id,
+            authorId = authorId,
+            authorName = authorName,
+            text = clean,
+            isGift = isGift,
+            giftEmoji = giftEmoji,
+            timestampMs = System.currentTimeMillis()
+        )
+        runCatching {
+            docRef.set(
+                mapOf(
+                    "authorId" to authorId,
+                    "authorName" to authorName,
+                    "text" to clean,
+                    "isGift" to isGift,
+                    "giftEmoji" to giftEmoji,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }
+        rtdbSource.pushLiveComment(streamId, comment)
+    }
+
+    suspend fun sendLiveReaction(
+        streamId: String,
+        hostId: String,
+        starsAmount: Int = 0
+    ): Result<Unit> = runCatching {
+        runCatching {
+            val updates = mutableMapOf<String, Any>(
+                "reactionsCount" to FieldValue.increment(1L)
+            )
+            if (starsAmount > 0) {
+                updates["starsEarned"] = FieldValue.increment(starsAmount.toLong())
+            }
+            db.collection("live_streams").document(streamId).update(updates).await()
+        }
+        if (starsAmount > 0 && hostId.isNotBlank()) {
+            runCatching {
+                db.collection("public_profiles").document(hostId)
+                    .update("stars", FieldValue.increment(starsAmount.toLong()))
+                    .await()
+            }
         }
     }
 }

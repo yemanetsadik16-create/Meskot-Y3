@@ -42,6 +42,7 @@ fun HubScreen(
     onOpenSaved: () -> Unit,
     onOpenNotifications: () -> Unit,
     onOpenReels: () -> Unit,
+    onOpenLive: () -> Unit,
     onOpenCreator: () -> Unit,
     onOpenAds: () -> Unit,
     onOpenMarket: () -> Unit,
@@ -134,7 +135,11 @@ fun HubScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     val unread = state.notifications.count { !it.isRead }
                     PortalCard(Icons.Outlined.Notifications, MeskotStrings.t(lang, "notifications"), if (unread > 0) "$unread unread" else "All caught up", Modifier.weight(1f), onOpenNotifications)
+                    PortalCard(Icons.Outlined.RadioButtonChecked, MeskotStrings.t(lang, "liveStreaming"), "${state.liveStreams.size} live now", Modifier.weight(1f), onOpenLive)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     PortalCard(Icons.Outlined.Person, MeskotStrings.t(lang, "editProfile"), me.location, Modifier.weight(1f)) { showEditProfile = true }
+                    Spacer(Modifier.weight(1f))
                 }
             }
         }

@@ -46,7 +46,8 @@ fun MessagesScreen(
     onOpenProfile: (String) -> Unit,
     onSendMessage: (String, String) -> Unit,
     onEditMessage: (String, String, String) -> Unit,
-    onDeleteMessage: (String, String) -> Unit
+    onDeleteMessage: (String, String) -> Unit,
+    onStartCall: (convoId: String, peerUid: String, peerName: String, callType: String) -> Unit
 ) {
     val me = state.currentUser ?: return
     val activeConvo = state.conversations.find { it.id == activeConvoId }
@@ -55,10 +56,11 @@ fun MessagesScreen(
         BackHandler { onSelectConvo(null) }
         val otherUid = activeConvo.participantIds.firstOrNull { it != me.uid } ?: me.uid
         val otherUser = state.users[otherUid]
+        val otherDisplayName = otherUser?.name ?: "Member"
         ChatThreadView(
             convoId = activeConvo.id,
             myUid = me.uid,
-            otherName = otherUser?.name ?: "Member",
+            otherName = otherDisplayName,
             otherColor = otherUser?.avatarColorHex ?: 0xFFC93E03,
             isOnline = otherUser?.isOnline == true,
             messages = activeConvo.messages,
@@ -67,7 +69,8 @@ fun MessagesScreen(
             onOpenProfile = { onOpenProfile(otherUid) },
             onSend = { onSendMessage(activeConvo.id, it) },
             onEdit = { msgId, txt -> onEditMessage(activeConvo.id, msgId, txt) },
-            onDelete = { msgId -> onDeleteMessage(activeConvo.id, msgId) }
+            onDelete = { msgId -> onDeleteMessage(activeConvo.id, msgId) },
+            onStartCall = { callType -> onStartCall(activeConvo.id, otherUid, otherDisplayName, callType) }
         )
     } else {
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 12.dp)) {
@@ -179,12 +182,12 @@ private fun ChatThreadView(
     onOpenProfile: () -> Unit,
     onSend: (String) -> Unit,
     onEdit: (String, String) -> Unit,
-    onDelete: (String) -> Unit
+    onDelete: (String) -> Unit,
+    onStartCall: (String) -> Unit
 ) {
     var draft by remember { mutableStateOf("") }
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
-    var activeCallType by remember { mutableStateOf<String?>(null) }
     var editingMsg by remember { mutableStateOf<ChatMessage?>(null) }
 
     val displayed = remember(messages, searchQuery) {
@@ -215,10 +218,16 @@ private fun ChatThreadView(
                 IconButton(onClick = { searchOpen = !searchOpen }) {
                     Icon(Icons.Outlined.Search, contentDescription = "Search chat", tint = MeskotMuted)
                 }
-                IconButton(onClick = { activeCallType = "Audio" }) {
+                IconButton(
+                    onClick = { onStartCall("audio") },
+                    modifier = Modifier.testTag("chat_audio_call_button")
+                ) {
                     Icon(Icons.Outlined.Call, contentDescription = "Audio call", tint = MeskotGold)
                 }
-                IconButton(onClick = { activeCallType = "Video" }) {
+                IconButton(
+                    onClick = { onStartCall("video") },
+                    modifier = Modifier.testTag("chat_video_call_button")
+                ) {
                     Icon(Icons.Outlined.Videocam, contentDescription = "Video call", tint = MeskotGold)
                 }
             }
@@ -328,35 +337,5 @@ private fun ChatThreadView(
                 }
             }
         )
-    }
-
-    // Call Overlay Dialog (UI stub matching index.html call overlay)
-    activeCallType?.let { type ->
-        Dialog(
-            onDismissRequest = { activeCallType = null },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Box(
-                modifier = Modifier.fillMaxSize().background(AuthBg).safeDrawingPadding().padding(32.dp)
-            ) {
-                Column(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    UserAvatar(otherName, otherColor, size = 104.dp)
-                    Spacer(Modifier.height(16.dp))
-                    Text(otherName, fontFamily = FrauncesFontFamily, style = MaterialTheme.typography.headlineMedium, color = Color.White)
-                    Spacer(Modifier.height(6.dp))
-                    Text("$type call · Ringing…", color = AuthMuted)
-                }
-                FilledIconButton(
-                    onClick = { activeCallType = null },
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = MeskotCross),
-                    modifier = Modifier.align(Alignment.BottomCenter).size(64.dp)
-                ) {
-                    Icon(Icons.Filled.CallEnd, contentDescription = "End call", tint = Color.White)
-                }
-            }
-        }
     }
 }

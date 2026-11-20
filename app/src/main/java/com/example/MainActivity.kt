@@ -40,6 +40,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import com.example.call.CallSignalingRepository
 import com.example.data.MeskotRepository
 import com.example.i18n.AppLang
 import com.example.i18n.MeskotStrings
@@ -75,6 +76,7 @@ private val KEY_LANG = stringPreferencesKey("meskot_lang")
 @Serializable data object SavedRoute
 @Serializable data object NotificationsRoute
 @Serializable data object ReelsRoute
+@Serializable data class LiveRoute(val streamId: String? = null)
 @Serializable data object CreatorRoute
 @Serializable data object AdsRoute
 
@@ -178,6 +180,7 @@ private fun MeskotAuthenticatedApp(
         factory = remember(firebaseUser.uid) {
             MeskotViewModel.Factory(
                 repository = MeskotRepository(appContext),
+                callSignaling = CallSignalingRepository(appContext),
                 currentUserId = firebaseUser.uid,
                 initialDisplayName = preferredDisplayName.ifBlank { firebaseUser.displayName ?: "Meskot Member" },
                 initialEmail = firebaseUser.email ?: "",
@@ -192,6 +195,8 @@ private fun MeskotAuthenticatedApp(
 
     val state by vm.dataState.collectAsStateWithLifecycle()
     val activeConvoId by vm.activeConvoId.collectAsStateWithLifecycle()
+    val activeLiveComments by vm.activeLiveComments.collectAsStateWithLifecycle()
+    val activeCall by vm.activeCall.collectAsStateWithLifecycle()
     val toastMsg by vm.toastMessage.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -388,6 +393,7 @@ private fun MeskotAuthenticatedApp(
                             lang = lang,
                             onOpenProfile = { navController.navigate(ProfileRoute(it)) },
                             onOpenReels = { navController.navigate(ReelsRoute) },
+                            onOpenLive = { sid -> navController.navigate(LiveRoute(sid)) },
                             onCreatePost = { text, privacy, bg, uri -> vm.createPost(text, privacy, bg, uri) },
                             onReaction = vm::toggleReaction,
                             onAddComment = vm::addComment,
@@ -424,7 +430,8 @@ private fun MeskotAuthenticatedApp(
                             onOpenProfile = { navController.navigate(ProfileRoute(it)) },
                             onSendMessage = vm::sendMessage,
                             onEditMessage = vm::editMessage,
-                            onDeleteMessage = vm::deleteMessage
+                            onDeleteMessage = vm::deleteMessage,
+                            onStartCall = vm::startCall
                         )
                     }
                     composable<MarketRoute> {
@@ -447,6 +454,7 @@ private fun MeskotAuthenticatedApp(
                             onOpenSaved = { navController.navigate(SavedRoute) },
                             onOpenNotifications = { navController.navigate(NotificationsRoute) },
                             onOpenReels = { navController.navigate(ReelsRoute) },
+                            onOpenLive = { navController.navigate(LiveRoute(null)) },
                             onOpenCreator = { navController.navigate(CreatorRoute) },
                             onOpenAds = { navController.navigate(AdsRoute) },
                             onOpenMarket = { navigateTopLevel(MarketRoute) },
@@ -542,6 +550,25 @@ private fun MeskotAuthenticatedApp(
                             onAddComment = vm::addReelComment
                         )
                     }
+                    composable<LiveRoute> { entry ->
+                        val route = entry.toRoute<LiveRoute>()
+                        LiveScreen(
+                            state = state,
+                            lang = lang,
+                            initialStreamId = route.streamId,
+                            activeComments = activeLiveComments,
+                            onBack = { navController.popBackStack() },
+                            onSelectStream = vm::selectLiveStream,
+                            onStartLive = vm::startLiveStream,
+                            onEndLive = vm::endLiveStream,
+                            onSendComment = { sid, txt -> vm.sendLiveComment(sid, txt) },
+                            onSendReaction = vm::sendLiveReaction,
+                            onShareRecap = { text ->
+                                vm.createPost(text, com.example.model.PostPrivacy.PUBLIC, 0, null)
+                            },
+                            onOpenProfile = { navController.navigate(ProfileRoute(it)) }
+                        )
+                    }
                     composable<CreatorRoute> {
                         CreatorStudioScreen(
                             state = state,
@@ -560,5 +587,22 @@ private fun MeskotAuthenticatedApp(
                 }
             }
         }
+    }
+
+    // Global Incoming / Outgoing WebRTC Audio & Video Call Overlay
+    activeCall?.let { call ->
+        val peerUid = if (call.callerId == currentUser.uid) call.calleeId else call.callerId
+        val peerProfile = state.users[peerUid]
+        val peerName = peerProfile?.name
+            ?: if (call.callerId == currentUser.uid) call.calleeName else call.callerName
+        val peerColor = peerProfile?.avatarColorHex ?: 0xFFC93E03L
+        CallOverlayScreen(
+            call = call,
+            currentUserId = currentUser.uid,
+            peerName = peerName,
+            peerColorHex = peerColor,
+            signaling = vm.callSignaling,
+            onCallClosed = vm::onCallClosed
+        )
     }
 }
